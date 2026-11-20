@@ -373,8 +373,9 @@ function HomePage({ store, goWeek }) {
       </div>
 
       {/* 左：Drive */}
-      <div className="order-3 lg:order-none">
+      <div className="order-3 lg:order-none space-y-5">
         <DrivePanel store={store} />
+        <SubjectProgress tasks={tasks} subjects={subjects} />
       </div>
 
       {/* 中：今日執行 */}
@@ -434,7 +435,6 @@ function HomePage({ store, goWeek }) {
             </div>
           </div>
         </div>
-        <SubjectProgress tasks={tasks} subjects={subjects} />
         <Scratchpad store={store} />
       </div>
 
