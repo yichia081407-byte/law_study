@@ -1,0 +1,1343 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>司律讀書儀表板</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700&display=swap" rel="stylesheet" />
+<script src="https://cdn.tailwindcss.com/3.4.16"></script>
+<script>
+  tailwind.config = {
+    theme: {
+      extend: {
+        colors: { paper: '#F9F8F6', ink: '#2D2B2A', sub: '#7C7772', line: '#E7E2DA', brick: '#8A4A45', brickbg: '#F7EFEF' },
+        fontFamily: { sans: ['"Noto Sans TC"', 'system-ui', 'sans-serif'] }
+      }
+    }
+  };
+</script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.26.4/babel.min.js"></script>
+<style>
+  body { background: #F9F8F6; color: #2D2B2A; }
+  .thin-scroll::-webkit-scrollbar { width: 6px; height: 6px; }
+  .thin-scroll::-webkit-scrollbar-thumb { background: #E1DBD1; border-radius: 3px; }
+  input[type=number]::-webkit-inner-spin-button { opacity: .4; }
+  .memo-paper { background-image: repeating-linear-gradient(transparent, transparent 27px, #EFEAE2 27px, #EFEAE2 28px); line-height: 28px; }
+  @keyframes fadeinout { 0% { opacity: 0; transform: translateY(-4px) } 15%,75% { opacity: 1; transform: none } 100% { opacity: 0 } }
+  .saved-flash { animation: fadeinout 1.6s ease forwards; }
+</style>
+</head>
+<body class="font-sans antialiased">
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useMemo, useRef, useCallback } = React;
+
+/* ====================== 常數與工具 ====================== */
+const STORAGE_KEY = 'LAW_STUDY_OS_DATA_V1';
+const BACKUP_KEY = 'LAW_STUDY_OS_BACKUP';
+
+const PALETTES = [
+  { bg: '#EBF1F5', fg: '#2C4A5E', bd: '#D4E0E8' }, // 民事法 灰藍
+  { bg: '#EEF3ED', fg: '#344E38', bd: '#D7E2D5' }, // 公法 鼠尾草綠
+  { bg: '#F7EFEF', fg: '#633333', bd: '#EAD5D5' }, // 刑事法 磚紅褐
+  { bg: '#F7F4EC', fg: '#5C4F2E', bd: '#EAE3CE' }, // 商事法 茶金灰
+  { bg: '#F3F0F4', fg: '#4A3E52', bd: '#E1D9E4' }, // 競爭法 灰紫
+];
+const NEUTRAL = { bg: '#F3F1ED', fg: '#6B6661', bd: '#E3DED6' };
+
+const DEFAULT_SUBJECTS = [
+  ['民事法', '民法'], ['民事法', '民事訴訟法'],
+  ['公法', '憲法'], ['公法', '行政法'],
+  ['刑事法', '刑法'], ['刑事法', '刑事訴訟法'],
+  ['商事法', '公司法'], ['商事法', '證券交易法'], ['商事法', '保險法'],
+  ['競爭法', '智慧財產權法'], ['競爭法', '公平交易法'],
+].map(([category, name]) => ({ id: uid(), category, name }));
+
+function uid() { return Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4); }
+const pad = n => String(n).padStart(2, '0');
+const ymd = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+const ymOf = d => ymd(d).slice(0, 7);
+const parseYmd = s => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d); };
+const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
+const mondayOf = d => { const x = new Date(d.getFullYear(), d.getMonth(), d.getDate()); return addDays(x, -((x.getDay() + 6) % 7)); };
+const isoWeek = d => {
+  const t = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+  const day = t.getUTCDay() || 7; t.setUTCDate(t.getUTCDate() + 4 - day);
+  const y = t.getUTCFullYear(); const w = Math.ceil(((t - Date.UTC(y, 0, 1)) / 864e5 + 1) / 7);
+  return `${y}-W${pad(w)}`;
+};
+const todayStr = () => ymd(new Date());
+const r2 = n => Math.round((+n || 0) * 100) / 100;
+const sumEst = arr => r2(arr.reduce((s, t) => s + (+t.estHours || 0), 0));
+const pctOf = (a, b) => (b > 0 ? Math.min(100, (a / b) * 100) : 0);
+const WEEKDAYS = ['一', '二', '三', '四', '五', '六', '日'];
+const fmtMD = s => { const d = parseYmd(s); return `${d.getMonth() + 1}/${d.getDate()}`; };
+const categoriesOf = subjects => [...new Set(subjects.map(s => s.category))];
+const colorOf = (cat, subjects) => {
+  const i = categoriesOf(subjects).indexOf(cat);
+  return i < 0 ? NEUTRAL : PALETTES[i % PALETTES.length];
+};
+const countsInSubject = t => !t.isBuffer && !t.adhoc;
+
+/* ====================== 範例資料 ====================== */
+function defaultSettings() {
+  return {
+    targetExamName: '116 年司法官／律師 第一試',
+    targetExamDate: '2027-08-21',
+    dailyCapacityLimit: 7,
+    weeklyCapacityLimit: 42,
+    scratchpadMemo: '',
+    subjects: DEFAULT_SUBJECTS.map(s => ({ ...s, id: uid() })),
+  };
+}
+
+function seedData() {
+  const now = new Date();
+  const T = ymd(now), Y = ymd(addDays(now, -1)), TM = ymd(addDays(now, 1)), M = ymOf(now);
+  const sched = date => ({ status: 'scheduled', assignedMonth: date.slice(0, 7), assignedDate: date, assignedWeek: isoWeek(parseYmd(date)) });
+  const month = { status: 'in_month', assignedMonth: M };
+  const mk = (category, subject, title, estHours, extra = {}) => ({ id: uid(), category, subject, title, estHours, note: '', status: 'backlog', ...extra });
+  const tasks = [
+    mk('民事法', '民法', '總則：權利能力與行為能力', 3, sched(T)),
+    mk('民事法', '民法', '債總：契約之成立與效力', 4, month),
+    mk('民事法', '民法', '物權：所有權通則', 3),
+    mk('民事法', '民事訴訟法', '當事人適格與訴訟參加', 2.5, sched(T)),
+    mk('民事法', '民事訴訟法', '既判力之客觀範圍', 3, month),
+    mk('公法', '憲法', '基本權：言論自由審查基準', 2, { ...sched(T), status: 'completed', actualHours: 2.5, completedAt: now.toISOString() }),
+    mk('公法', '憲法', '權力分立與憲法法庭', 2.5, month),
+    mk('公法', '行政法', '行政處分之概念與附款', 3, sched(Y)),
+    mk('公法', '行政法', '行政訴訟類型', 3.5),
+    mk('刑事法', '刑法', '構成要件該當性與因果關係', 3, sched(TM)),
+    mk('刑事法', '刑法', '正犯與共犯', 3.5, month),
+    mk('刑事法', '刑事訴訟法', '強制處分：搜索扣押', 2.5, month),
+    mk('刑事法', '刑事訴訟法', '證據排除法則', 3),
+    mk('商事法', '公司法', '股東會與董事會', 3, month),
+    mk('商事法', '公司法', '董事之忠實義務', 2),
+    mk('商事法', '證券交易法', '內線交易', 2, month),
+    mk('商事法', '保險法', '保險利益與複保險', 2),
+    mk('競爭法', '智慧財產權法', '著作權合理使用', 2, month),
+    mk('競爭法', '公平交易法', '結合管制與聯合行為', 2.5),
+  ];
+  const drive = [
+    { id: uid(), title: '司律共筆總資料夾', url: 'https://drive.google.com/', children: [
+      { id: uid(), title: '民事法', url: 'https://drive.google.com/', children: [
+        { id: uid(), title: '民法講義', url: 'https://drive.google.com/', children: [] },
+        { id: uid(), title: '民訴考古題', url: 'https://drive.google.com/', children: [] },
+      ] },
+      { id: uid(), title: '公法', url: 'https://drive.google.com/', children: [] },
+      { id: uid(), title: '刑事法', url: 'https://drive.google.com/', children: [] },
+    ] },
+    { id: uid(), title: '歷屆試題 PDF', url: 'https://drive.google.com/', children: [] },
+  ];
+  return { tasks, drive, settings: defaultSettings() };
+}
+
+function normalize(d) {
+  const base = defaultSettings();
+  const s = d.settings || {};
+  return {
+    tasks: Array.isArray(d.tasks) ? d.tasks : [],
+    drive: Array.isArray(d.drive) ? d.drive : [],
+    settings: { ...base, ...s, subjects: Array.isArray(s.subjects) ? s.subjects : base.subjects },
+  };
+}
+function loadData() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) { const d = JSON.parse(raw); if (d && Array.isArray(d.tasks)) return normalize(d); }
+  } catch (e) { }
+  return seedData();
+}
+
+/* ====================== 資料 Store ====================== */
+function useStore() {
+  const [data, setData] = useState(loadData);
+  const [savedTick, setSavedTick] = useState(0);
+  const prev = useRef(null);
+  useEffect(() => {
+    try {
+      if (prev.current) localStorage.setItem(BACKUP_KEY, JSON.stringify({ savedAt: new Date().toISOString(), data: prev.current }));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+    } catch (e) { }
+    if (prev.current) setSavedTick(t => t + 1);
+    prev.current = data;
+  }, [data]);
+
+  const api = useMemo(() => {
+    const apply = (t, patch) => ({ ...t, ...(typeof patch === 'function' ? patch(t) : patch) });
+    return {
+      replaceAll: d => setData(normalize(d)),
+      updateTask: (id, patch) => setData(d => ({ ...d, tasks: d.tasks.map(t => (t.id === id ? apply(t, patch) : t)) })),
+      updateTasks: (ids, patch) => { const s = new Set(ids); setData(d => ({ ...d, tasks: d.tasks.map(t => (s.has(t.id) ? apply(t, patch) : t)) })); },
+      addTasks: arr => setData(d => ({ ...d, tasks: [...d.tasks, ...arr] })),
+      deleteTasks: ids => { const s = new Set(ids); setData(d => ({ ...d, tasks: d.tasks.filter(t => !s.has(t.id)) })); },
+      setSettings: patch => setData(d => ({ ...d, settings: { ...d.settings, ...(typeof patch === 'function' ? patch(d.settings) : patch) } })),
+      setDrive: fn => setData(d => ({ ...d, drive: typeof fn === 'function' ? fn(d.drive) : fn })),
+      mutate: fn => setData(d => fn(d)),
+      completeTask: (id, actual) => setData(d => ({ ...d, tasks: d.tasks.map(t => t.id === id ? { ...t, status: 'completed', actualHours: r2(actual), completedAt: new Date().toISOString() } : t) })),
+      uncompleteTask: id => setData(d => ({ ...d, tasks: d.tasks.map(t => t.id === id ? { ...t, status: t.assignedDate ? 'scheduled' : t.assignedMonth ? 'in_month' : 'backlog', actualHours: undefined, completedAt: undefined } : t) })),
+      splitTask: (id, pct, actual) => setData(d => {
+        const t = d.tasks.find(x => x.id === id); if (!t) return d;
+        const doneEst = r2(t.estHours * pct / 100);
+        const remEst = r2(t.estHours - doneEst);
+        const baseRem = t.remainingPercent ?? 100;
+        const newRem = Math.round(baseRem * (100 - pct) / 100);
+        const baseTitle = t.title.replace(/\s*\[剩餘 \d+%\]$/, '');
+        const rest = {
+          ...t, id: uid(), title: `${baseTitle} [剩餘 ${newRem}%]`, estHours: remEst,
+          actualHours: undefined, completedAt: undefined, splitDonePercent: undefined,
+          status: 'in_month', assignedMonth: t.assignedMonth || t.assignedDate?.slice(0, 7) || ymOf(new Date()),
+          assignedDate: undefined, assignedWeek: undefined,
+          parentTaskId: t.parentTaskId || t.id, remainingPercent: newRem, splitPending: true,
+        };
+        const done = { ...t, estHours: doneEst, originalEstHours: t.originalEstHours ?? t.estHours, splitDonePercent: pct, status: 'completed', actualHours: r2(actual), completedAt: new Date().toISOString() };
+        const tasks = [];
+        d.tasks.forEach(x => { if (x.id === id) { tasks.push(done, rest); } else tasks.push(x); });
+        return { ...d, tasks };
+      }),
+    };
+  }, []);
+  return { data, savedTick, ...api };
+}
+
+/* ====================== 共用 UI ====================== */
+const BTN = 'inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-sm border border-line rounded-md bg-white hover:bg-[#F3F0EA] text-ink transition whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed';
+const BTN_PRIMARY = 'inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-sm border border-ink rounded-md bg-ink hover:bg-[#45423F] text-white transition whitespace-nowrap disabled:opacity-40';
+const BTN_GHOST = 'inline-flex items-center justify-center w-7 h-7 rounded-md text-sub hover:text-ink hover:bg-[#F3F0EA] transition';
+const INPUT = 'w-full px-2.5 py-1.5 text-sm border border-line rounded-md bg-white outline-none focus:border-[#BDB3A6] focus:ring-2 focus:ring-[#EFEAE2]';
+const CARD = 'bg-white border border-line rounded-xl';
+const LABEL = 'block text-xs text-sub mb-1';
+
+function Modal({ title, onClose, children, width = 'max-w-md' }) {
+  useEffect(() => {
+    const h = e => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', h); return () => window.removeEventListener('keydown', h);
+  }, [onClose]);
+  return (
+    <div className="fixed inset-0 z-50 flex items-start sm:items-center justify-center bg-[#2D2B2A]/20 p-4 overflow-y-auto" onMouseDown={e => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className={`w-full ${width} bg-white border border-line rounded-xl shadow-[0_8px_30px_rgba(45,43,42,.08)] my-8`}>
+        <div className="flex items-center justify-between px-5 py-3 border-b border-line">
+          <h3 className="font-medium text-[15px]">{title}</h3>
+          <button onClick={onClose} className={BTN_GHOST} aria-label="關閉">✕</button>
+        </div>
+        <div className="p-5">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+function CatBadge({ task, subjects, small }) {
+  const c = task.isBuffer ? NEUTRAL : colorOf(task.category, subjects);
+  return (
+    <span className={`inline-flex items-center border rounded ${small ? 'px-1.5 text-[11px]' : 'px-2 py-0.5 text-xs'}`} style={{ background: c.bg, color: c.fg, borderColor: c.bd }}>
+      {task.isBuffer ? '緩衝' : task.subject}
+    </span>
+  );
+}
+
+function ProgressBar({ pct, color = '#2D2B2A', marker, height = 'h-2' }) {
+  return (
+    <div className={`relative w-full ${height} bg-[#F0ECE6] rounded-full`}>
+      <div className={`absolute left-0 top-0 ${height} rounded-full transition-all duration-500`} style={{ width: `${pct}%`, background: color }} />
+      {marker != null && (
+        <div className="absolute -top-1 -bottom-1 w-[2px] bg-[#B9A98F]" style={{ left: `calc(${marker}% - 1px)` }} title={`時間流逝 ${Math.round(marker)}%`} />
+      )}
+    </div>
+  );
+}
+
+function SubjectSelect({ subjects, category, subject, onChange, className = INPUT, allowEmpty }) {
+  const cats = categoriesOf(subjects);
+  const val = category && subject ? `${category}||${subject}` : '';
+  const known = subjects.some(s => s.category === category && s.name === subject);
+  return (
+    <select className={className} value={val} onChange={e => { const [c, s] = e.target.value.split('||'); onChange(c || '', s || ''); }}>
+      {(allowEmpty || !val) && <option value="">— 選擇科目 —</option>}
+      {val && !known && <option value={val}>{category} / {subject}（已移除）</option>}
+      {cats.map(c => (
+        <optgroup key={c} label={c}>
+          {subjects.filter(s => s.category === c).map(s => <option key={s.id} value={`${c}||${s.name}`}>{s.name}</option>)}
+        </optgroup>
+      ))}
+    </select>
+  );
+}
+
+function downloadFile(name, text) {
+  const blob = new Blob([text], { type: 'application/json' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name;
+  document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); return true; }
+  catch (e) {
+    const ta = document.createElement('textarea'); ta.value = text; document.body.appendChild(ta); ta.select();
+    const ok = document.execCommand('copy'); ta.remove(); return ok;
+  }
+}
+
+/* ====================== 完成 / 拆分 Modal ====================== */
+function CompleteModal({ task, store, onClose }) {
+  const [mode, setMode] = useState('full');
+  const [actual, setActual] = useState(String(task.estHours));
+  const [pct, setPct] = useState('50');
+  const ref = useRef();
+  useEffect(() => { ref.current?.select(); }, [mode]);
+  const p = Math.max(1, Math.min(99, parseFloat(pct) || 0));
+  const submit = e => {
+    e.preventDefault();
+    const a = parseFloat(actual); const act = isNaN(a) ? task.estHours : a;
+    if (mode === 'full') store.completeTask(task.id, act);
+    else store.splitTask(task.id, p, act);
+    onClose();
+  };
+  return (
+    <Modal title="完成任務" onClose={onClose}>
+      <form onSubmit={submit} className="space-y-4">
+        <div>
+          <div className="text-sm font-medium">{task.title}</div>
+          <div className="text-xs text-sub mt-0.5">預估工時 {task.estHours} hr（進度條只計算預估工時）</div>
+        </div>
+        <div className="grid grid-cols-2 gap-2 p-1 bg-paper border border-line rounded-lg text-sm">
+          <button type="button" onClick={() => setMode('full')} className={`py-1.5 rounded-md ${mode === 'full' ? 'bg-white border border-line shadow-sm' : 'text-sub'}`}>✓ 全部讀完</button>
+          <button type="button" onClick={() => setMode('split')} className={`py-1.5 rounded-md ${mode === 'split' ? 'bg-white border border-line shadow-sm' : 'text-sub'}`}>未讀完，拆分進度</button>
+        </div>
+        {mode === 'split' && (
+          <div>
+            <label className={LABEL}>已完成比例（%）</label>
+            <input type="number" min="1" max="99" className={INPUT} value={pct} onChange={e => setPct(e.target.value)} />
+            <div className="text-xs text-sub mt-1.5 leading-relaxed">
+              本卡認列 <b className="text-ink">{r2(task.estHours * p / 100)} hr</b> 並打勾；另生成「{task.title.replace(/\s*\[剩餘 \d+%\]$/, '')} [剩餘 {Math.round((task.remainingPercent ?? 100) * (100 - p) / 100)}%]」<b className="text-ink">{r2(task.estHours - r2(task.estHours * p / 100))} hr</b>，送入 ⚠️ 過期／未完成任務格。
+            </div>
+          </div>
+        )}
+        <div>
+          <label className={LABEL}>本次實際花費時間（hr，僅作記錄）</label>
+          <input ref={ref} autoFocus type="number" step="0.25" min="0" className={INPUT} value={actual} onChange={e => setActual(e.target.value)} />
+        </div>
+        <div className="flex justify-end gap-2 pt-1">
+          <button type="button" className={BTN} onClick={onClose}>取消</button>
+          <button type="submit" className={BTN_PRIMARY}>確認完成 ↵</button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+/* ====================== 首頁 Daily Focus ====================== */
+function HomePage({ store, goWeek }) {
+  const { tasks, settings, drive } = store.data;
+  const { subjects } = settings;
+  const [completing, setCompleting] = useState(null);
+  const [editExam, setEditExam] = useState(false);
+  const T = todayStr(); const now = new Date(); const M = ymOf(now);
+
+  const todays = tasks.filter(t => t.assignedDate === T).sort((a, b) => (a.status === 'completed') - (b.status === 'completed'));
+  const doneToday = todays.filter(t => t.status === 'completed');
+  const total = sumEst(todays), doneH = sumEst(doneToday);
+  const monthTasks = tasks.filter(t => t.assignedMonth === M);
+  const monthTotal = sumEst(monthTasks), monthDone = sumEst(monthTasks.filter(t => t.status === 'completed'));
+  const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+  const elapsed = (now.getDate() / daysInMonth) * 100;
+  const monthPct = pctOf(monthDone, monthTotal);
+  const overdueCount = tasks.filter(t => t.status !== 'completed' && ((t.assignedDate && t.assignedDate < T) || (t.splitPending && !t.assignedDate))).length;
+  const dday = Math.ceil((parseYmd(settings.targetExamDate) - parseYmd(T)) / 864e5);
+
+  return (
+    <div className="grid gap-5 lg:grid-cols-[260px_minmax(0,1fr)_320px]">
+      {/* 頂部 */}
+      <div className="lg:col-span-3 grid gap-4 md:grid-cols-[minmax(0,280px)_1fr]">
+        <div className={`${CARD} p-5 relative`}>
+          <button className={`${BTN_GHOST} absolute top-3 right-3`} onClick={() => setEditExam(true)} title="編輯考試">✎</button>
+          <div className="text-xs text-sub pr-8">{settings.targetExamName}</div>
+          <div className="mt-1 flex items-baseline gap-1">
+            <span className="text-4xl font-light tracking-tight">{dday >= 0 ? `D-${dday}` : `D+${-dday}`}</span>
+          </div>
+          <div className="text-xs text-sub mt-1">目標日 {settings.targetExamDate.replace(/-/g, '/')}</div>
+        </div>
+        <div className={`${CARD} p-5 flex flex-col justify-center`}>
+          <div className="text-xs text-sub">{now.getFullYear()} 年 {now.getMonth() + 1} 月 {now.getDate()} 日（{WEEKDAYS[(now.getDay() + 6) % 7]}）</div>
+          <div className="mt-1.5 text-[15px] leading-relaxed">
+            今日排定 <b>{todays.length}</b> 個任務（共 <b>{total}</b> hr），已完成 <b>{doneH}</b> hr，剩餘 <b>{r2(total - doneH)}</b> hr。
+          </div>
+          {overdueCount > 0 && (
+            <button onClick={goWeek} className="mt-2 self-start text-xs px-2 py-1 rounded border border-[#EAD5D5] bg-brickbg text-[#633333] hover:opacity-80">
+              ⚠️ 有 {overdueCount} 個過期／未完成任務待重新排程 →
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* 左：Drive */}
+      <div className="order-3 lg:order-none">
+        <DrivePanel store={store} />
+      </div>
+
+      {/* 中：今日執行 */}
+      <div className={`${CARD} p-5 order-1 lg:order-none`}>
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="font-medium">今日執行清單</h2>
+          <span className="text-xs text-sub">{doneToday.length} / {todays.length} 完成</span>
+        </div>
+        {todays.length === 0 ? (
+          <div className="text-center py-12 text-sm text-sub">
+            今天還沒有排程。<br />
+            <button className={`${BTN} mt-3`} onClick={goWeek}>前往當週排程拖拉任務 →</button>
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {todays.map(t => {
+              const done = t.status === 'completed';
+              const c = t.isBuffer ? NEUTRAL : colorOf(t.category, subjects);
+              return (
+                <div key={t.id} className={`flex items-start gap-3 p-3 border border-line rounded-lg transition ${done ? 'bg-paper' : 'bg-white hover:border-[#D6CEC2]'}`} style={{ borderLeft: `3px solid ${c.fg}` }}>
+                  <button
+                    onClick={() => (done ? store.uncompleteTask(t.id) : setCompleting(t))}
+                    className={`mt-0.5 w-5 h-5 shrink-0 rounded border flex items-center justify-center text-xs ${done ? 'bg-ink border-ink text-white' : 'border-[#C9BFB2] hover:border-ink'}`}
+                    title={done ? '取消完成' : '完成任務'}>{done ? '✓' : ''}</button>
+                  <div className="flex-1 min-w-0">
+                    <div className={`text-sm ${done ? 'line-through text-sub' : ''}`}>{t.title}</div>
+                    <div className="flex flex-wrap items-center gap-1.5 mt-1 text-xs text-sub">
+                      <CatBadge task={t} subjects={subjects} small />
+                      <span>預估 {t.estHours} hr</span>
+                      {done && t.actualHours != null && <span>· 實際 {t.actualHours} hr</span>}
+                      {t.splitDonePercent && <span>· 已讀 {t.splitDonePercent}%</span>}
+                      {t.adhoc && <span>· 臨時</span>}
+                      {t.note && <span className="truncate">· {t.note}</span>}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* 右：進度 + 備忘錄 */}
+      <div className="space-y-5 order-2 lg:order-none">
+        <div className={`${CARD} p-5 space-y-4`}>
+          <div>
+            <div className="flex justify-between text-sm mb-1.5"><span>今日進度</span><span className="text-sub">{Math.round(pctOf(doneH, total))}%</span></div>
+            <ProgressBar pct={pctOf(doneH, total)} />
+            <div className="text-[11px] text-sub mt-1">{doneH} / {total} hr</div>
+          </div>
+          <div>
+            <div className="flex justify-between text-sm mb-1.5"><span>{now.getMonth() + 1} 月進度</span><span className="text-sub">{Math.round(monthPct)}%</span></div>
+            <ProgressBar pct={monthPct} marker={elapsed} />
+            <div className="text-[11px] text-sub mt-1 flex justify-between">
+              <span>{monthDone} / {monthTotal} hr</span>
+              <span className={monthPct + 0.01 < elapsed ? 'text-brick' : ''}>時間已過 {Math.round(elapsed)}%{monthPct + 0.01 < elapsed ? '・進度落後' : ''}</span>
+            </div>
+          </div>
+        </div>
+        <SubjectProgress tasks={tasks} subjects={subjects} />
+        <Scratchpad store={store} />
+      </div>
+
+      {completing && <CompleteModal task={completing} store={store} onClose={() => setCompleting(null)} />}
+      {editExam && <ExamModal store={store} onClose={() => setEditExam(false)} />}
+    </div>
+  );
+}
+
+function ExamModal({ store, onClose }) {
+  const s = store.data.settings;
+  const [name, setName] = useState(s.targetExamName); const [date, setDate] = useState(s.targetExamDate);
+  return (
+    <Modal title="編輯大考倒數" onClose={onClose}>
+      <form className="space-y-3" onSubmit={e => { e.preventDefault(); if (!date) return; store.setSettings({ targetExamName: name.trim() || '目標考試', targetExamDate: date }); onClose(); }}>
+        <div><label className={LABEL}>考試名稱</label><input className={INPUT} value={name} onChange={e => setName(e.target.value)} autoFocus /></div>
+        <div><label className={LABEL}>目標日期</label><input type="date" className={INPUT} value={date} onChange={e => setDate(e.target.value)} /></div>
+        <div className="flex justify-end gap-2"><button type="button" className={BTN} onClick={onClose}>取消</button><button className={BTN_PRIMARY}>儲存</button></div>
+      </form>
+    </Modal>
+  );
+}
+
+function SubjectProgress({ tasks, subjects }) {
+  const [open, setOpen] = useState({});
+  const cats = categoriesOf(subjects);
+  const valid = tasks.filter(countsInSubject);
+  return (
+    <div className={`${CARD} p-5`}>
+      <h3 className="text-sm font-medium mb-3">各科整體進度</h3>
+      <div className="space-y-3">
+        {cats.map(cat => {
+          const c = colorOf(cat, subjects);
+          const ct = valid.filter(t => t.category === cat);
+          const tot = sumEst(ct), dn = sumEst(ct.filter(t => t.status === 'completed'));
+          return (
+            <div key={cat}>
+              <button className="w-full text-left" onClick={() => setOpen(o => ({ ...o, [cat]: !o[cat] }))}>
+                <div className="flex justify-between items-center text-sm mb-1">
+                  <span className="flex items-center gap-1.5"><span className="text-[10px] text-sub w-2">{open[cat] ? '▾' : '▸'}</span><span style={{ color: c.fg }}>{cat}</span></span>
+                  <span className="text-xs text-sub">{Math.round(pctOf(dn, tot))}% · {dn}/{tot}h</span>
+                </div>
+                <ProgressBar pct={pctOf(dn, tot)} color={c.fg} height="h-1.5" />
+              </button>
+              {open[cat] && (
+                <div className="pl-4 mt-2 space-y-2">
+                  {subjects.filter(s => s.category === cat).map(s => {
+                    const st = ct.filter(t => t.subject === s.name);
+                    const a = sumEst(st.filter(t => t.status === 'completed')), b = sumEst(st);
+                    return (
+                      <div key={s.id}>
+                        <div className="flex justify-between text-xs mb-1"><span>{s.name}</span><span className="text-sub">{Math.round(pctOf(a, b))}% · {a}/{b}h</span></div>
+                        <ProgressBar pct={pctOf(a, b)} color={c.fg} height="h-1" />
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function Scratchpad({ store }) {
+  const saved = store.data.settings.scratchpadMemo || '';
+  const [text, setText] = useState(saved);
+  const [msg, setMsg] = useState('');
+  const timer = useRef(); const pending = useRef(false);
+  useEffect(() => { if (!pending.current) setText(saved); }, [saved]); // 匯入/還原時同步
+  const onChange = v => {
+    setText(v); clearTimeout(timer.current); pending.current = true;
+    timer.current = setTimeout(() => { pending.current = false; store.setSettings({ scratchpadMemo: v }); }, 500);
+  };
+  useEffect(() => () => clearTimeout(timer.current), []);
+  const flash = m => { setMsg(m); setTimeout(() => setMsg(''), 1400); };
+  return (
+    <div className={`${CARD} p-5`}>
+      <div className="flex items-center justify-between mb-2">
+        <h3 className="text-sm font-medium">隨手備忘錄</h3>
+        <div className="flex items-center gap-1">
+          {msg && <span className="text-[11px] text-sub mr-1">{msg}</span>}
+          <button className={BTN_GHOST} title="複製全文" onClick={async () => flash((await copyText(text)) ? '已複製' : '複製失敗')}>⧉</button>
+          <button className={BTN_GHOST} title="清空" onClick={() => { if (text && confirm('確定清空備忘錄？')) { setText(''); clearTimeout(timer.current); store.setSettings({ scratchpadMemo: '' }); } }}>🗑</button>
+        </div>
+      </div>
+      <textarea
+        className="memo-paper w-full min-h-[196px] text-sm bg-transparent outline-none resize-y placeholder:text-[#B8B1A8]"
+        placeholder="突然想到的爭點、要問老師的問題…（停止打字 0.5 秒自動儲存）"
+        value={text} onChange={e => onChange(e.target.value)} />
+    </div>
+  );
+}
+
+/* ====================== Google Drive 樹狀目錄 ====================== */
+const normUrl = u => { const s = (u || '').trim(); if (!s) return undefined; return /^[a-z]+:\/\//i.test(s) ? s : `https://${s}`; };
+function parseIndented(text) {
+  const lines = text.replace(/\r/g, '').split('\n').filter(l => l.trim());
+  const root = []; const stack = [{ level: -1, children: root }];
+  for (const line of lines) {
+    const lead = line.match(/^[\t ]*/)[0];
+    const level = (lead.match(/\t/g) || []).length + Math.floor(lead.replace(/\t/g, '').length / 2);
+    const content = line.trim().replace(/^[-*•]\s+/, '');
+    const [t, ...rest] = content.split('|');
+    const node = { id: uid(), title: t.trim() || '(未命名)', url: normUrl(rest.join('|')), children: [] };
+    while (stack.length > 1 && stack[stack.length - 1].level >= level) stack.pop();
+    stack[stack.length - 1].children.push(node);
+    stack.push({ level, children: node.children });
+  }
+  return root;
+}
+const mapTree = (nodes, fn) => nodes.map(n => fn({ ...n, children: mapTree(n.children || [], fn) }));
+const removeNode = (nodes, id) => nodes.filter(n => n.id !== id).map(n => ({ ...n, children: removeNode(n.children || [], id) }));
+const flatTree = (nodes, depth = 0, out = []) => { nodes.forEach(n => { out.push({ node: n, depth }); flatTree(n.children || [], depth + 1, out); }); return out; };
+const insertUnder = (nodes, parentId, node) => parentId ? mapTree(nodes, n => n.id === parentId ? { ...n, children: [...n.children, node] } : n) : [...nodes, node];
+
+function DrivePanel({ store }) {
+  const drive = store.data.drive;
+  const [collapsed, setCollapsed] = useState({});
+  const [importOpen, setImportOpen] = useState(false);
+  const [form, setForm] = useState(null); // {mode:'add'|'edit', node?, parentId?}
+  const Node = ({ n, depth }) => {
+    const hasKids = n.children && n.children.length > 0;
+    const isOpen = !collapsed[n.id];
+    return (
+      <div>
+        <div className="group flex items-center gap-1 rounded-md hover:bg-[#F6F3EE] pr-1" style={{ paddingLeft: depth * 14 }}>
+          <button className="w-5 h-6 text-[10px] text-sub shrink-0" onClick={() => hasKids && setCollapsed(c => ({ ...c, [n.id]: isOpen }))}>
+            {hasKids ? (isOpen ? '▾' : '▸') : ''}
+          </button>
+          <span className="text-xs shrink-0">{hasKids ? '📁' : n.url ? '🔗' : '📄'}</span>
+          {n.url ? (
+            <a href={n.url} target="_blank" rel="noopener noreferrer" className="flex-1 min-w-0 truncate text-sm py-1 hover:underline underline-offset-2" title={n.url}>{n.title}</a>
+          ) : (
+            <span className="flex-1 min-w-0 truncate text-sm py-1 cursor-default" onClick={() => hasKids && setCollapsed(c => ({ ...c, [n.id]: isOpen }))}>{n.title}</span>
+          )}
+          <span className="hidden group-hover:flex items-center">
+            <button className="w-6 h-6 text-xs text-sub hover:text-ink" title="在此新增子項目" onClick={() => setForm({ mode: 'add', parentId: n.id })}>＋</button>
+            <button className="w-6 h-6 text-xs text-sub hover:text-ink" title="編輯" onClick={() => setForm({ mode: 'edit', node: n })}>✎</button>
+            <button className="w-6 h-6 text-xs text-sub hover:text-brick" title="刪除" onClick={() => { if (confirm(`刪除「${n.title}」${hasKids ? '及其所有子項目' : ''}？`)) store.setDrive(d => removeNode(d, n.id)); }}>✕</button>
+          </span>
+        </div>
+        {hasKids && isOpen && n.children.map(k => <Node key={k.id} n={k} depth={depth + 1} />)}
+      </div>
+    );
+  };
+  return (
+    <div className={`${CARD} p-4`}>
+      <div className="flex items-center justify-between mb-2">
+        <h3 className="text-sm font-medium">Google Drive 快捷目錄</h3>
+      </div>
+      <div className="flex gap-1.5 mb-3">
+        <button className={`${BTN} !px-2 !text-xs flex-1`} onClick={() => setImportOpen(true)}>📝 縮排文字批次匯入</button>
+        <button className={`${BTN} !px-2 !text-xs`} onClick={() => setForm({ mode: 'add', parentId: '' })}>＋ 新增連結</button>
+      </div>
+      <div className="max-h-[520px] overflow-y-auto thin-scroll -mx-1 px-1">
+        {drive.length === 0 ? <div className="text-xs text-sub py-6 text-center">尚無連結</div> : drive.map(n => <Node key={n.id} n={n} depth={0} />)}
+      </div>
+      {importOpen && <DriveImportModal store={store} onClose={() => setImportOpen(false)} />}
+      {form && <DriveNodeModal store={store} form={form} onClose={() => setForm(null)} />}
+    </div>
+  );
+}
+
+function DriveImportModal({ store, onClose }) {
+  const [text, setText] = useState('');
+  const [replace, setReplace] = useState(false);
+  const preview = useMemo(() => flatTree(parseIndented(text)), [text]);
+  const onKeyDown = e => {
+    if (e.key === 'Tab') {
+      e.preventDefault(); const el = e.target; const s = el.selectionStart, en = el.selectionEnd;
+      const v = text.slice(0, s) + '\t' + text.slice(en); setText(v);
+      requestAnimationFrame(() => { el.selectionStart = el.selectionEnd = s + 1; });
+    }
+  };
+  return (
+    <Modal title="縮排文字批次匯入" onClose={onClose} width="max-w-2xl">
+      <div className="grid md:grid-cols-2 gap-4">
+        <div>
+          <label className={LABEL}>每行一個項目，格式「名稱 | URL」，以 Tab（或 2 空格）縮排表示階層</label>
+          <textarea className={`${INPUT} font-mono h-64 !text-xs`} value={text} onChange={e => setText(e.target.value)} onKeyDown={onKeyDown} autoFocus
+            placeholder={'民事法 | https://drive.google.com/...\n\t民法講義 | https://drive.google.com/...\n\t民訴考古題 | https://...\n公法 | https://...'} />
+        </div>
+        <div>
+          <div className={LABEL}>預覽（{preview.length} 項）</div>
+          <div className="h-64 overflow-auto thin-scroll border border-line rounded-md p-2 text-sm">
+            {preview.map(({ node, depth }) => (
+              <div key={node.id} className="truncate" style={{ paddingLeft: depth * 14 }}>{node.url ? '🔗' : '📁'} {node.title}</div>
+            ))}
+          </div>
+        </div>
+      </div>
+      <div className="flex items-center justify-between mt-4">
+        <label className="text-sm flex items-center gap-2"><input type="checkbox" checked={replace} onChange={e => setReplace(e.target.checked)} />取代現有目錄（預設為附加）</label>
+        <div className="flex gap-2">
+          <button className={BTN} onClick={onClose}>取消</button>
+          <button className={BTN_PRIMARY} disabled={!preview.length} onClick={() => {
+            const nodes = parseIndented(text);
+            if (replace && !confirm('確定以匯入內容取代整個目錄？')) return;
+            store.setDrive(d => (replace ? nodes : [...d, ...nodes])); onClose();
+          }}>匯入</button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+function DriveNodeModal({ store, form, onClose }) {
+  const editing = form.mode === 'edit';
+  const [title, setTitle] = useState(editing ? form.node.title : '');
+  const [url, setUrl] = useState(editing ? form.node.url || '' : '');
+  const [parentId, setParentId] = useState(form.parentId || '');
+  const folders = flatTree(store.data.drive);
+  return (
+    <Modal title={editing ? '編輯項目' : '新增資料夾／連結'} onClose={onClose}>
+      <form className="space-y-3" onSubmit={e => {
+        e.preventDefault(); if (!title.trim()) return;
+        if (editing) store.setDrive(d => mapTree(d, n => n.id === form.node.id ? { ...n, title: title.trim(), url: normUrl(url) } : n));
+        else store.setDrive(d => insertUnder(d, parentId, { id: uid(), title: title.trim(), url: normUrl(url), children: [] }));
+        onClose();
+      }}>
+        <div><label className={LABEL}>名稱</label><input className={INPUT} value={title} onChange={e => setTitle(e.target.value)} autoFocus /></div>
+        <div><label className={LABEL}>URL（可留空作為純資料夾）</label><input className={INPUT} value={url} onChange={e => setUrl(e.target.value)} placeholder="https://drive.google.com/..." /></div>
+        {!editing && (
+          <div><label className={LABEL}>放在</label>
+            <select className={INPUT} value={parentId} onChange={e => setParentId(e.target.value)}>
+              <option value="">（最上層）</option>
+              {folders.map(({ node, depth }) => <option key={node.id} value={node.id}>{'　'.repeat(depth)}{node.title}</option>)}
+            </select>
+          </div>
+        )}
+        <div className="flex justify-end gap-2"><button type="button" className={BTN} onClick={onClose}>取消</button><button className={BTN_PRIMARY}>儲存</button></div>
+      </form>
+    </Modal>
+  );
+}
+
+/* ====================== 任務總庫 Database ====================== */
+function statusLabel(t) {
+  if (t.status === 'completed') return { text: '✓ 已完成', cls: 'text-[#344E38]' };
+  if (t.assignedDate) return { text: `排定 ${fmtMD(t.assignedDate)}`, cls: 'text-ink' };
+  if (t.splitPending) return { text: '⚠️ 待重排', cls: 'text-brick' };
+  if (t.assignedMonth) return { text: `${+t.assignedMonth.slice(5)} 月份池`, cls: 'text-sub' };
+  return { text: '未指派', cls: 'text-[#B0A89E]' };
+}
+
+function DatabasePage({ store }) {
+  const { tasks, settings } = store.data; const { subjects } = settings;
+  const cats = categoriesOf(subjects);
+  const [tab, setTab] = useState('全部');
+  const [q, setQ] = useState('');
+  const [statusF, setStatusF] = useState('all');
+  const [sel, setSel] = useState(new Set());
+  const [grid, setGrid] = useState(false);
+  const [mgr, setMgr] = useState(false);
+  const [month, setMonth] = useState(ymOf(new Date()));
+
+  const order = useMemo(() => { const m = {}; subjects.forEach((s, i) => { m[`${s.category}||${s.name}`] = i; }); return m; }, [subjects]);
+  const all = tasks.filter(countsInSubject);
+  const rows = all
+    .filter(t => tab === '全部' || t.category === tab)
+    .filter(t => !q || `${t.title} ${t.subject} ${t.note || ''}`.toLowerCase().includes(q.toLowerCase()))
+    .filter(t => statusF === 'all' || (statusF === 'backlog' ? (!t.assignedMonth && t.status !== 'completed') : statusF === 'month' ? (t.assignedMonth && !t.assignedDate && t.status !== 'completed') : statusF === 'scheduled' ? (t.assignedDate && t.status !== 'completed') : t.status === 'completed'))
+    .map((t, i) => ({ t, i }))
+    .sort((a, b) => ((order[`${a.t.category}||${a.t.subject}`] ?? 999) - (order[`${b.t.category}||${b.t.subject}`] ?? 999)) || a.i - b.i)
+    .map(x => x.t);
+  const allSel = rows.length > 0 && rows.every(t => sel.has(t.id));
+  const toggle = id => setSel(s => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  const selIds = [...sel].filter(id => tasks.some(t => t.id === id));
+
+  const assignMonth = () => {
+    store.updateTasks(selIds, t => t.status === 'completed' ? { assignedMonth: month } : { assignedMonth: month, status: 'in_month', assignedDate: undefined, assignedWeek: undefined, splitPending: false });
+    setSel(new Set());
+  };
+
+  return (
+    <div className="pb-24">
+      <div className="flex flex-wrap items-center gap-2 mb-4">
+        <h2 className="text-lg font-medium mr-2">任務總庫</h2>
+        <button className={grid ? BTN_PRIMARY : BTN} onClick={() => setGrid(g => !g)}>📊 {grid ? '收合批次表格' : '開啟批次表格編輯'}</button>
+        <button className={BTN} onClick={() => setMgr(true)}>⚙️ 管理科目</button>
+        <div className="flex-1" />
+        <input className={`${INPUT} !w-48`} placeholder="搜尋章節／備註…" value={q} onChange={e => setQ(e.target.value)} />
+        <select className={`${INPUT} !w-32`} value={statusF} onChange={e => setStatusF(e.target.value)}>
+          <option value="all">全部狀態</option><option value="backlog">未指派</option><option value="month">月份池</option><option value="scheduled">已排程</option><option value="completed">已完成</option>
+        </select>
+      </div>
+
+      {grid && <GridEditor store={store} onClose={() => setGrid(false)} />}
+
+      <div className="flex gap-1 overflow-x-auto thin-scroll mb-3 border-b border-line">
+        {['全部', ...cats].map(c => {
+          const col = c === '全部' ? null : colorOf(c, subjects);
+          const active = tab === c;
+          return (
+            <button key={c} onClick={() => setTab(c)} className={`px-3 py-2 text-sm whitespace-nowrap -mb-px border-b-2 transition ${active ? 'border-ink' : 'border-transparent text-sub hover:text-ink'}`} style={active && col ? { color: col.fg, borderColor: col.fg } : {}}>
+              {c}<span className="ml-1 text-[11px] text-sub">{all.filter(t => c === '全部' || t.category === c).length}</span>
+            </button>
+          );
+        })}
+      </div>
+
+      <div className="text-xs text-sub mb-2">顯示 {rows.length} 筆 · 預估共 {sumEst(rows)} hr · 已完成 {sumEst(rows.filter(t => t.status === 'completed'))} hr</div>
+
+      <div className={`${CARD} overflow-x-auto thin-scroll`}>
+        <table className="w-full text-sm min-w-[860px]">
+          <thead>
+            <tr className="text-left text-xs text-sub border-b border-line bg-[#FCFBF9]">
+              <th className="p-2.5 w-9"><input type="checkbox" checked={allSel} onChange={() => setSel(allSel ? new Set() : new Set(rows.map(t => t.id)))} /></th>
+              <th className="p-2.5 w-40 font-normal">科目</th>
+              <th className="p-2.5 font-normal">章節名稱</th>
+              <th className="p-2.5 w-24 font-normal">預估 hr</th>
+              <th className="p-2.5 w-20 font-normal">實際 hr</th>
+              <th className="p-2.5 w-52 font-normal">備註</th>
+              <th className="p-2.5 w-24 font-normal">狀態</th>
+              <th className="p-2.5 w-10"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length === 0 && <tr><td colSpan="8" className="text-center text-sub py-10">沒有符合的任務。點「📊 開啟批次表格編輯」開始建立章節。</td></tr>}
+            {rows.map(t => {
+              const st = statusLabel(t); const c = colorOf(t.category, subjects);
+              const cell = 'w-full bg-transparent px-1.5 py-1 rounded outline-none hover:bg-[#F6F3EE] focus:bg-white focus:ring-1 focus:ring-[#D6CEC2]';
+              return (
+                <tr key={t.id} className={`border-b border-line last:border-0 ${sel.has(t.id) ? 'bg-[#FBF9F5]' : ''}`}>
+                  <td className="p-2.5"><input type="checkbox" checked={sel.has(t.id)} onChange={() => toggle(t.id)} /></td>
+                  <td className="p-1.5">
+                    <div className="flex items-center gap-1.5">
+                      <span className="w-1.5 h-5 rounded-full shrink-0" style={{ background: c.fg }} />
+                      <SubjectSelect subjects={subjects} category={t.category} subject={t.subject} className={`${cell} !px-1`} onChange={(category, subject) => category && store.updateTask(t.id, { category, subject })} />
+                    </div>
+                  </td>
+                  <td className="p-1.5"><input className={`${cell} ${t.status === 'completed' ? 'text-sub' : ''}`} value={t.title} onChange={e => store.updateTask(t.id, { title: e.target.value })} /></td>
+                  <td className="p-1.5"><input type="number" step="0.5" min="0" className={cell} value={t.estHours} onChange={e => store.updateTask(t.id, { estHours: e.target.value === '' ? 0 : r2(parseFloat(e.target.value)) })} /></td>
+                  <td className="p-2.5 text-sub">{t.actualHours ?? '—'}</td>
+                  <td className="p-1.5"><input className={cell} value={t.note || ''} placeholder="—" onChange={e => store.updateTask(t.id, { note: e.target.value })} /></td>
+                  <td className={`p-2.5 text-xs whitespace-nowrap ${st.cls}`}>{st.text}</td>
+                  <td className="p-1.5"><button className={BTN_GHOST} title="刪除" onClick={() => { if (confirm(`刪除「${t.title}」？`)) store.deleteTasks([t.id]); }}>🗑</button></td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      {selIds.length > 0 && (
+        <div className="fixed bottom-5 left-1/2 -translate-x-1/2 z-40 w-[calc(100%-32px)] max-w-3xl bg-white border border-line rounded-xl shadow-[0_8px_30px_rgba(45,43,42,.12)] px-4 py-3 flex flex-wrap items-center gap-2">
+          <span className="text-sm mr-1">已選 <b>{selIds.length}</b> 筆 · {sumEst(tasks.filter(t => sel.has(t.id)))} hr</span>
+          <div className="flex-1" />
+          <input type="month" className={`${INPUT} !w-40`} value={month} onChange={e => setMonth(e.target.value)} />
+          <button className={BTN_PRIMARY} disabled={!month} onClick={assignMonth}>📅 指派至月份池</button>
+          <button className={BTN} onClick={() => { store.updateTasks(selIds, t => t.status === 'completed' ? {} : { assignedMonth: undefined, assignedDate: undefined, assignedWeek: undefined, status: 'backlog', splitPending: false }); setSel(new Set()); }}>↩ 移回未指派</button>
+          <button className={`${BTN} !text-brick`} onClick={() => { if (confirm(`確定刪除 ${selIds.length} 筆任務？此動作無法復原（可從設定的快照還原上一步）。`)) { store.deleteTasks(selIds); setSel(new Set()); } }}>🗑️ 批次刪除</button>
+          <button className={BTN_GHOST} title="取消選取" onClick={() => setSel(new Set())}>✕</button>
+        </div>
+      )}
+
+      {mgr && <SubjectManager store={store} onClose={() => setMgr(false)} />}
+    </div>
+  );
+}
+
+/* ---------- Excel 試算表批次編輯 ---------- */
+const COLS = ['category', 'subject', 'title', 'est', 'note'];
+const emptyRow = () => ({ category: '', subject: '', title: '', est: '', note: '' });
+
+function GridEditor({ store, onClose }) {
+  const { subjects } = store.data.settings;
+  const cats = categoriesOf(subjects);
+  const [rows, setRows] = useState(() => Array.from({ length: 15 }, emptyRow));
+  const refs = useRef({});
+  const focusCell = (r, c) => setTimeout(() => { const el = refs.current[`${r}-${c}`]; if (el) { el.focus(); el.select?.(); } }, 0);
+
+  const normalizeCell = (row, col, raw) => {
+    const v = String(raw ?? '').trim();
+    const next = { ...row };
+    if (col === 'subject') {
+      if (!v) return next;
+      next.subject = v;
+      const hit = subjects.find(s => s.name === v && (!row.category || s.category === row.category)) || subjects.find(s => s.name === v);
+      if (hit && (!row.category || !cats.includes(row.category))) next.category = hit.category;
+    } else if (col === 'category') {
+      const sub = subjects.find(s => s.name === v);
+      if (!cats.includes(v) && sub) { next.category = sub.category; next.subject = sub.name; }
+      else next.category = v;
+    } else if (col === 'est') next.est = v.replace(/[^\d.]/g, '');
+    else next[col] = v;
+    return next;
+  };
+  const setCell = (r, col, v) => setRows(rs => rs.map((row, i) => (i === r ? (col === 'est' || col === 'title' || col === 'note' ? { ...row, [col]: v } : normalizeCell(row, col, v)) : row)));
+
+  const onKeyDown = (e, r, c) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      if (r + 1 >= rows.length) setRows(rs => [...rs, ...Array.from({ length: 10 }, emptyRow)]);
+      focusCell(r + 1, c);
+    }
+  };
+  const onPaste = (e, r, c) => {
+    const text = e.clipboardData.getData('text/plain');
+    if (!text || (!text.includes('\t') && !text.includes('\n'))) return; // 單格交給瀏覽器
+    e.preventDefault();
+    const lines = text.replace(/\r/g, '').split('\n');
+    while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
+    setRows(rs => {
+      const out = [...rs];
+      while (out.length < r + lines.length) out.push(emptyRow());
+      lines.forEach((line, i) => {
+        let row = { ...out[r + i] };
+        line.split('\t').forEach((val, j) => { const ci = c + j; if (ci < COLS.length) row = normalizeCell(row, COLS[ci], val); });
+        out[r + i] = row;
+      });
+      return out;
+    });
+  };
+
+  const resolve = row => {
+    let category = row.category.trim(), subject = row.subject.trim();
+    if (!cats.includes(category)) { const s = subjects.find(x => x.name === subject); if (s) category = s.category; else return null; }
+    if (!subject) subject = subjects.find(s => s.category === category)?.name;
+    if (!subjects.some(s => s.category === category && s.name === subject)) return null;
+    return { category, subject };
+  };
+  const filled = rows.filter(r => r.title.trim());
+  const invalid = filled.filter(r => !resolve(r));
+
+  const commit = () => {
+    if (!filled.length) { alert('沒有可寫入的列（章節名稱為空的列會自動忽略）。'); return; }
+    if (invalid.length && !confirm(`有 ${invalid.length} 列的大類／子科無法辨識，將略過這些列。繼續寫入其餘 ${filled.length - invalid.length} 列？`)) return;
+    const news = filled.map(r => { const cs = resolve(r); if (!cs) return null; const est = parseFloat(r.est); return { id: uid(), ...cs, title: r.title.trim(), estHours: isNaN(est) ? 1 : r2(est), note: r.note.trim(), status: 'backlog' }; }).filter(Boolean);
+    store.addTasks(news);
+    setRows(Array.from({ length: 15 }, emptyRow));
+    onClose();
+  };
+
+  const cellCls = 'w-full px-2 py-1.5 text-sm bg-transparent outline-none focus:bg-[#FFFDF8] focus:ring-1 focus:ring-inset focus:ring-[#BDB3A6]';
+  return (
+    <div className={`${CARD} p-4 mb-5`}>
+      <div className="flex flex-wrap items-center gap-2 mb-3">
+        <div className="text-sm font-medium">批次表格編輯</div>
+        <div className="text-xs text-sub">Tab 向右 · Enter 向下 · 可從 Excel／Google Sheets 框選多列直接 Ctrl+V 貼上</div>
+        <div className="flex-1" />
+        <button className={BTN} onClick={onClose}>✕ 取消</button>
+        <button className={BTN_PRIMARY} onClick={commit}>✓ 確認寫入資料庫{filled.length ? `（${filled.length - invalid.length} 列）` : ''}</button>
+      </div>
+      <datalist id="dl-cats">{cats.map(c => <option key={c} value={c} />)}</datalist>
+      {cats.map((c, i) => <datalist key={c} id={`dl-sub-${i}`}>{subjects.filter(s => s.category === c).map(s => <option key={s.id} value={s.name} />)}</datalist>)}
+      <datalist id="dl-sub-all">{subjects.map(s => <option key={s.id} value={s.name}>{s.category}</option>)}</datalist>
+      <div className="overflow-auto thin-scroll max-h-[460px] border border-line rounded-md">
+        <table className="w-full min-w-[760px] border-collapse text-sm">
+          <thead className="sticky top-0 bg-[#FCFBF9] z-10">
+            <tr className="text-xs text-sub">
+              <th className="border border-line w-10 font-normal py-1.5">#</th>
+              <th className="border border-line w-32 font-normal text-left px-2">大類 ▾</th>
+              <th className="border border-line w-36 font-normal text-left px-2">子科 ▾</th>
+              <th className="border border-line font-normal text-left px-2">章節名稱</th>
+              <th className="border border-line w-24 font-normal text-left px-2">預估工時</th>
+              <th className="border border-line w-56 font-normal text-left px-2">備註</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, r) => {
+              const bad = row.title.trim() && !resolve(row);
+              const ci = cats.indexOf(row.category);
+              return (
+                <tr key={r} className={bad ? 'bg-brickbg' : ''}>
+                  <td className="border border-line text-center text-[11px] text-sub">{r + 1}</td>
+                  {COLS.map((col, c) => (
+                    <td key={col} className="border border-line p-0">
+                      <input
+                        ref={el => (refs.current[`${r}-${c}`] = el)}
+                        className={cellCls}
+                        list={col === 'category' ? 'dl-cats' : col === 'subject' ? (ci >= 0 ? `dl-sub-${ci}` : 'dl-sub-all') : undefined}
+                        inputMode={col === 'est' ? 'decimal' : undefined}
+                        value={row[col]}
+                        onChange={e => setCell(r, col, e.target.value)}
+                        onBlur={e => (col === 'category' || col === 'subject') && setRows(rs => rs.map((x, i) => i === r ? normalizeCell(x, col, e.target.value) : x))}
+                        onKeyDown={e => onKeyDown(e, r, c)}
+                        onPaste={e => onPaste(e, r, c)}
+                        placeholder={r === 0 ? ['民事法', '民法', '債總：給付不能', '3', '可選'][c] : ''}
+                      />
+                    </td>
+                  ))}
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <div className="flex items-center justify-between mt-2">
+        <button className={BTN} onClick={() => setRows(rs => [...rs, ...Array.from({ length: 10 }, emptyRow)])}>＋ 增加 10 列</button>
+        {invalid.length > 0 && <span className="text-xs text-brick">紅底列的科目無法辨識，寫入時會略過</span>}
+      </div>
+    </div>
+  );
+}
+
+/* ---------- 科目管理 ---------- */
+function Editable({ value, onCommit, className }) {
+  const [v, setV] = useState(value);
+  useEffect(() => setV(value), [value]);
+  return <input className={className} value={v} onChange={e => setV(e.target.value)} onBlur={() => onCommit(v)} onKeyDown={e => e.key === 'Enter' && e.target.blur()} />;
+}
+function SubjectManager({ store, onClose }) {
+  const { subjects } = store.data.settings; const tasks = store.data.tasks;
+  const cats = categoriesOf(subjects);
+  const [newCat, setNewCat] = useState(''); const [newCatSub, setNewCatSub] = useState('');
+  const [addSub, setAddSub] = useState({});
+
+  const renameCategory = (oldN, newN) => {
+    newN = newN.trim(); if (!newN || newN === oldN) return;
+    if (cats.includes(newN)) { alert('已有同名大類'); return; }
+    store.mutate(d => ({ ...d, settings: { ...d.settings, subjects: d.settings.subjects.map(s => s.category === oldN ? { ...s, category: newN } : s) }, tasks: d.tasks.map(t => t.category === oldN ? { ...t, category: newN } : t) }));
+  };
+  const renameSubject = (cat, oldN, newN) => {
+    newN = newN.trim(); if (!newN || newN === oldN) return;
+    if (subjects.some(s => s.category === cat && s.name === newN)) { alert('此大類已有同名子科'); return; }
+    store.mutate(d => ({ ...d, settings: { ...d.settings, subjects: d.settings.subjects.map(s => s.category === cat && s.name === oldN ? { ...s, name: newN } : s) }, tasks: d.tasks.map(t => t.category === cat && t.subject === oldN ? { ...t, subject: newN } : t) }));
+  };
+  const delSubject = s => {
+    const n = tasks.filter(t => t.category === s.category && t.subject === s.name).length;
+    if (!confirm(`刪除子科「${s.name}」？${n ? `\n其下 ${n} 筆任務會保留，但需重新指定科目。` : ''}`)) return;
+    store.setSettings(st => ({ subjects: st.subjects.filter(x => x.id !== s.id) }));
+  };
+  const delCategory = c => {
+    const n = tasks.filter(t => t.category === c).length;
+    if (!confirm(`刪除大類「${c}」及其所有子科？${n ? `\n其下 ${n} 筆任務會保留，但需重新指定科目。` : ''}`)) return;
+    store.setSettings(st => ({ subjects: st.subjects.filter(x => x.category !== c) }));
+  };
+  const addSubject = c => {
+    const name = (addSub[c] || '').trim(); if (!name) return;
+    if (subjects.some(s => s.category === c && s.name === name)) { alert('已存在'); return; }
+    store.setSettings(st => {
+      const list = [...st.subjects]; let idx = -1; list.forEach((s, i) => { if (s.category === c) idx = i; });
+      list.splice(idx + 1, 0, { id: uid(), category: c, name }); return { subjects: list };
+    });
+    setAddSub(a => ({ ...a, [c]: '' }));
+  };
+
+  const cell = 'bg-transparent px-1.5 py-1 rounded outline-none hover:bg-[#F6F3EE] focus:bg-white focus:ring-1 focus:ring-[#D6CEC2]';
+
+  return (
+    <Modal title="⚙️ 管理科目" onClose={onClose} width="max-w-2xl">
+      <div className="text-xs text-sub mb-3">直接點文字即可改名（任務會同步更新）。色標依大類順序套用 5 色低彩度色盤。</div>
+      <div className="space-y-3 max-h-[60vh] overflow-y-auto thin-scroll pr-1">
+        {cats.map(c => {
+          const col = colorOf(c, subjects);
+          return (
+            <div key={c} className="border border-line rounded-lg p-3" style={{ background: col.bg + '66' }}>
+              <div className="flex items-center gap-2 mb-2">
+                <span className="w-3 h-3 rounded-sm" style={{ background: col.fg }} />
+                <Editable value={c} onCommit={v => renameCategory(c, v)} className={`${cell} font-medium flex-1`} />
+                <button className={`${BTN_GHOST} hover:!text-brick`} title="刪除大類" onClick={() => delCategory(c)}>🗑</button>
+              </div>
+              <div className="flex flex-wrap gap-1.5 pl-5">
+                {subjects.filter(s => s.category === c).map(s => (
+                  <div key={s.id} className="flex items-center bg-white border border-line rounded-md pl-1">
+                    <Editable value={s.name} onCommit={v => renameSubject(c, s.name, v)} className={`${cell} text-sm w-28`} />
+                    <button className="w-6 h-7 text-xs text-sub hover:text-brick" onClick={() => delSubject(s)}>✕</button>
+                  </div>
+                ))}
+                <form className="flex items-center" onSubmit={e => { e.preventDefault(); addSubject(c); }}>
+                  <input className={`${INPUT} !w-28 !py-1`} placeholder="＋ 新子科" value={addSub[c] || ''} onChange={e => setAddSub(a => ({ ...a, [c]: e.target.value }))} />
+                </form>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <form className="mt-4 pt-4 border-t border-line flex flex-wrap gap-2 items-end" onSubmit={e => {
+        e.preventDefault(); const c = newCat.trim(), s = newCatSub.trim(); if (!c || !s) return;
+        if (cats.includes(c)) { alert('已有同名大類'); return; }
+        store.setSettings(st => ({ subjects: [...st.subjects, { id: uid(), category: c, name: s }] })); setNewCat(''); setNewCatSub('');
+      }}>
+        <div className="flex-1 min-w-[120px]"><label className={LABEL}>新增大類</label><input className={INPUT} value={newCat} onChange={e => setNewCat(e.target.value)} placeholder="例：國際私法" /></div>
+        <div className="flex-1 min-w-[120px]"><label className={LABEL}>第一個子科</label><input className={INPUT} value={newCatSub} onChange={e => setNewCatSub(e.target.value)} placeholder="例：涉外民事法律適用法" /></div>
+        <button className={BTN_PRIMARY} disabled={!newCat.trim() || !newCatSub.trim()}>＋ 新增</button>
+      </form>
+    </Modal>
+  );
+}
+
+/* ====================== 當週排程 Kanban ====================== */
+function DropZone({ onDropTask, className = '', children }) {
+  const [over, setOver] = useState(false);
+  return (
+    <div
+      onDragOver={e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; if (!over) setOver(true); }}
+      onDragLeave={e => { if (!e.currentTarget.contains(e.relatedTarget)) setOver(false); }}
+      onDrop={e => { e.preventDefault(); setOver(false); const id = e.dataTransfer.getData('text/plain'); if (id) onDropTask(id); }}
+      className={`${className} transition ${over ? 'ring-2 ring-[#C9BFB2] bg-[#F3F0EA]' : ''}`}>
+      {children}
+    </div>
+  );
+}
+
+function KanbanCard({ task, subjects, onUnschedule, onComplete, onUncomplete, compact }) {
+  const done = task.status === 'completed';
+  const c = task.isBuffer ? NEUTRAL : colorOf(task.category, subjects);
+  return (
+    <div
+      draggable={!done}
+      onDragStart={e => { e.dataTransfer.setData('text/plain', task.id); e.dataTransfer.effectAllowed = 'move'; }}
+      className={`group relative rounded-md border p-2 text-xs select-none ${done ? 'opacity-60' : 'cursor-grab active:cursor-grabbing hover:shadow-sm'} ${task.isBuffer ? 'border-dashed' : ''}`}
+      style={{ background: c.bg, borderColor: c.bd, color: c.fg }}>
+      <div className="flex items-start gap-1.5">
+        {(onComplete || onUncomplete) && (
+          <button onClick={() => (done ? onUncomplete?.() : onComplete?.())} className={`mt-px w-3.5 h-3.5 shrink-0 rounded-sm border flex items-center justify-center text-[9px] bg-white/70`} style={{ borderColor: c.fg }} title={done ? '取消完成' : '完成'}>{done ? '✓' : ''}</button>
+        )}
+        <div className={`flex-1 min-w-0 leading-snug pr-3 ${done ? 'line-through' : ''}`}>{task.title}</div>
+        {onUnschedule && !done && (
+          <button onClick={onUnschedule} className="absolute top-1 right-1 w-4 h-4 text-[10px] opacity-40 hover:opacity-100" title="抽回待排池">✕</button>
+        )}
+      </div>
+      <div className="flex items-center justify-between mt-1 opacity-80 text-[11px]">
+        <span>{task.isBuffer ? '緩衝' : task.subject}{!compact && task.assignedDate && task.assignedDate < todayStr() && !done ? ` · 原 ${fmtMD(task.assignedDate)}` : ''}</span>
+        <span>{task.estHours}h{done && task.actualHours != null ? ` / 實 ${task.actualHours}h` : ''}</span>
+      </div>
+    </div>
+  );
+}
+
+function WeekPage({ store }) {
+  const { tasks, settings } = store.data; const { subjects } = settings;
+  const T = todayStr();
+  const [weekStart, setWeekStart] = useState(() => mondayOf(new Date()));
+  const [capOpen, setCapOpen] = useState(false);
+  const [quickOpen, setQuickOpen] = useState(false);
+  const [completing, setCompleting] = useState(null);
+  const [poolScope, setPoolScope] = useState('week'); // week | all | backlog
+  const [overdueOpen, setOverdueOpen] = useState(true);
+  const [bufferForm, setBufferForm] = useState(null);
+
+  const days = Array.from({ length: 7 }, (_, i) => ymd(addDays(weekStart, i)));
+  const weekKey = isoWeek(weekStart);
+  const months = [...new Set(days.map(d => d.slice(0, 7)))];
+  const defaultMonth = months.includes(T.slice(0, 7)) ? T.slice(0, 7) : months[0];
+
+  const overdue = tasks.filter(t => t.status !== 'completed' && ((t.assignedDate && t.assignedDate < T) || (t.splitPending && !t.assignedDate)));
+  const pool = tasks.filter(t => t.status !== 'completed' && !t.assignedDate && !t.splitPending && (
+    poolScope === 'backlog' ? !t.assignedMonth && !t.adhoc : poolScope === 'all' ? !!t.assignedMonth : months.includes(t.assignedMonth)));
+  const weekTasks = tasks.filter(t => t.assignedDate && days.includes(t.assignedDate));
+  const weekLoad = sumEst(weekTasks);
+  const doneWithActual = weekTasks.filter(t => t.status === 'completed' && t.actualHours != null);
+  const estDone = sumEst(doneWithActual), actDone = r2(doneWithActual.reduce((s, t) => s + (+t.actualHours || 0), 0));
+  const deviation = estDone > 0 ? ((actDone - estDone) / estDone) * 100 : null;
+
+  const toDay = (id, date) => store.updateTask(id, t => t.status === 'completed' ? {} : ({
+    assignedDate: date, assignedWeek: isoWeek(parseYmd(date)), assignedMonth: t.assignedMonth || date.slice(0, 7), status: 'scheduled', splitPending: false,
+  }));
+  const toPool = id => store.updateTask(id, t => t.status === 'completed' ? {} : ({
+    assignedDate: undefined, assignedWeek: undefined, assignedMonth: t.assignedMonth || defaultMonth, status: 'in_month', splitPending: false,
+  }));
+  const end = addDays(weekStart, 6);
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center gap-2">
+        <h2 className="text-lg font-medium mr-2">當週排程</h2>
+        <button className={BTN} onClick={() => setWeekStart(w => addDays(w, -7))}>‹ 上一週</button>
+        <button className={BTN} onClick={() => setWeekStart(mondayOf(new Date()))}>📅 回到本週</button>
+        <button className={BTN} onClick={() => setWeekStart(w => addDays(w, 7))}>下一週 ›</button>
+        <span className="text-sm text-sub ml-1">{weekStart.getFullYear()}/{weekStart.getMonth() + 1}/{weekStart.getDate()} – {end.getMonth() + 1}/{end.getDate()} · {weekKey}</span>
+        <div className="flex-1" />
+        <button className={BTN} onClick={() => setCapOpen(true)}>⚙️ 容量設定</button>
+        <button className={BTN_PRIMARY} onClick={() => setQuickOpen(true)}>＋ 插入今日臨時任務</button>
+      </div>
+
+      {/* 負載水位 */}
+      <div className={`${CARD} p-4 grid gap-4 md:grid-cols-[1fr_auto] items-center`}>
+        <div>
+          <div className="flex justify-between text-sm mb-1.5">
+            <span>本週負載水位</span>
+            <span className={weekLoad > settings.weeklyCapacityLimit ? 'text-brick' : 'text-sub'}>{weekLoad} / {settings.weeklyCapacityLimit} hr{weekLoad > settings.weeklyCapacityLimit ? '・超出安全容量' : ''}</span>
+          </div>
+          <ProgressBar pct={pctOf(weekLoad, settings.weeklyCapacityLimit)} color={weekLoad > settings.weeklyCapacityLimit ? '#8A4A45' : '#2D2B2A'} />
+        </div>
+        <div className="text-xs text-sub md:text-right md:border-l md:border-line md:pl-4">
+          <div>預估 vs. 實際（本週已完成）</div>
+          {deviation == null ? <div className="mt-0.5">尚無完成記錄</div> : (
+            <div className="mt-0.5 text-ink text-sm">預估 {estDone}h → 實際 {actDone}h <span className={deviation > 15 ? 'text-brick' : 'text-sub'}>（{deviation >= 0 ? '+' : ''}{Math.round(deviation)}%）</span></div>
+          )}
+        </div>
+      </div>
+
+      {/* 過期格 */}
+      <div className="rounded-xl border border-[#EAD5D5] bg-[#FBF6F5]">
+        <button className="w-full flex items-center justify-between px-4 py-2.5 text-sm" onClick={() => setOverdueOpen(o => !o)}>
+          <span className="text-[#633333]">⚠️ 過期／未完成任務格 <span className="text-xs opacity-70">（{overdue.length} 筆 · {sumEst(overdue)} hr）— 拖曳到下方任一天重新安排</span></span>
+          <span className="text-xs text-sub">{overdueOpen ? '收合 ▴' : '展開 ▾'}</span>
+        </button>
+        {overdueOpen && (
+          <div className="px-4 pb-3">
+            {overdue.length === 0 ? <div className="text-xs text-sub pb-1">沒有過期任務，很好 ✓</div> : (
+              <div className="grid gap-2 grid-cols-[repeat(auto-fill,minmax(180px,1fr))]">
+                {overdue.map(t => <KanbanCard key={t.id} task={t} subjects={subjects} onUnschedule={() => toPool(t.id)} onComplete={() => setCompleting(t)} />)}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-[250px_minmax(0,1fr)]">
+        {/* 待排池 */}
+        <DropZone onDropTask={toPool} className={`${CARD} p-3 self-start`}>
+          <div className="flex items-center justify-between mb-2">
+            <h3 className="text-sm font-medium">待排清單</h3>
+            <span className="text-xs text-sub">{pool.length} 筆 · {sumEst(pool)}h</span>
+          </div>
+          <select className={`${INPUT} !text-xs mb-2`} value={poolScope} onChange={e => setPoolScope(e.target.value)}>
+            <option value="week">本週涵蓋月份池（{months.map(m => +m.slice(5) + '月').join('、')}）</option>
+            <option value="all">全部月份池</option>
+            <option value="backlog">總庫未指派任務</option>
+          </select>
+          <div className="space-y-1.5 max-h-[560px] overflow-y-auto thin-scroll pr-0.5 min-h-[80px]">
+            {pool.length === 0 && <div className="text-xs text-sub text-center py-6">沒有待排任務<br />（到任務總庫勾選後「指派至月份池」）</div>}
+            {pool.map(t => (
+              <div key={t.id} className="relative">
+                <KanbanCard task={t} subjects={subjects} compact />
+                {t.isBuffer && <button className="absolute top-1 right-1 w-4 h-4 text-[10px] text-sub hover:text-brick" title="刪除緩衝塊" onClick={() => store.deleteTasks([t.id])}>✕</button>}
+              </div>
+            ))}
+          </div>
+          <div className="mt-2 pt-2 border-t border-line">
+            {bufferForm ? (
+              <form className="flex gap-1.5" onSubmit={e => {
+                e.preventDefault(); const h = parseFloat(bufferForm.h); if (!(h > 0)) return;
+                store.addTasks([{ id: uid(), category: '緩衝', subject: '緩衝', title: bufferForm.title.trim() || '彈性緩衝時間', estHours: r2(h), status: 'in_month', assignedMonth: defaultMonth, isBuffer: true }]);
+                setBufferForm(null);
+              }}>
+                <input className={`${INPUT} !text-xs`} value={bufferForm.title} onChange={e => setBufferForm(f => ({ ...f, title: e.target.value }))} autoFocus />
+                <input type="number" step="0.5" min="0.5" className={`${INPUT} !text-xs !w-14`} value={bufferForm.h} onChange={e => setBufferForm(f => ({ ...f, h: e.target.value }))} />
+                <button className={`${BTN} !px-2 !text-xs`}>＋</button>
+              </form>
+            ) : (
+              <button className={`${BTN} w-full !text-xs border-dashed`} onClick={() => setBufferForm({ title: '彈性緩衝時間', h: '2' })}>＋ 建立緩衝時間塊（不計入各科進度）</button>
+            )}
+          </div>
+        </DropZone>
+
+        {/* 7 天 */}
+        <div className="overflow-x-auto thin-scroll">
+          <div className="grid grid-cols-7 gap-2 min-w-[840px]">
+            {days.map((d, i) => {
+              const list = tasks.filter(t => t.assignedDate === d);
+              const load = sumEst(list);
+              const over = load > settings.dailyCapacityLimit;
+              const isToday = d === T;
+              return (
+                <DropZone key={d} onDropTask={id => toDay(id, d)} className={`rounded-xl border p-2 min-h-[420px] flex flex-col ${isToday ? 'bg-white border-[#BDB3A6]' : d < T ? 'bg-[#F5F3EF] border-line' : 'bg-white border-line'}`}>
+                  <div className="mb-2 px-0.5">
+                    <div className="flex items-baseline justify-between">
+                      <span className={`text-sm ${isToday ? 'font-medium' : ''}`}>週{WEEKDAYS[i]}</span>
+                      <span className="text-xs text-sub">{fmtMD(d)}{isToday ? ' · 今天' : ''}</span>
+                    </div>
+                    <div className={`mt-1 text-[11px] inline-block px-1.5 rounded border ${over ? 'bg-brickbg text-[#633333] border-[#EAD5D5]' : 'text-sub border-line'}`}>
+                      {load} / {settings.dailyCapacityLimit} hr{over ? ' 超載' : ''}
+                    </div>
+                  </div>
+                  <div className="space-y-1.5 flex-1">
+                    {list.map(t => (
+                      <KanbanCard key={t.id} task={t} subjects={subjects} compact
+                        onUnschedule={() => toPool(t.id)}
+                        onComplete={() => setCompleting(t)}
+                        onUncomplete={() => store.uncompleteTask(t.id)} />
+                    ))}
+                  </div>
+                </DropZone>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+
+      {capOpen && <CapacityModal store={store} onClose={() => setCapOpen(false)} />}
+      {quickOpen && <QuickTaskModal store={store} onClose={() => setQuickOpen(false)} />}
+      {completing && <CompleteModal task={completing} store={store} onClose={() => setCompleting(null)} />}
+    </div>
+  );
+}
+
+function CapacityModal({ store, onClose }) {
+  const s = store.data.settings;
+  const [daily, setDaily] = useState(String(s.dailyCapacityLimit)); const [weekly, setWeekly] = useState(String(s.weeklyCapacityLimit));
+  return (
+    <Modal title="⚙️ 容量設定" onClose={onClose}>
+      <form className="space-y-3" onSubmit={e => { e.preventDefault(); const d = parseFloat(daily), w = parseFloat(weekly); if (!(d > 0) || !(w > 0)) return; store.setSettings({ dailyCapacityLimit: r2(d), weeklyCapacityLimit: r2(w) }); onClose(); }}>
+        <div><label className={LABEL}>每日上限（hr）— 超過時欄位標籤轉為磚紅警示</label><input type="number" step="0.5" min="0.5" className={INPUT} value={daily} onChange={e => setDaily(e.target.value)} autoFocus /></div>
+        <div><label className={LABEL}>整週安全容量（hr）</label><input type="number" step="0.5" min="0.5" className={INPUT} value={weekly} onChange={e => setWeekly(e.target.value)} /></div>
+        <div className="flex justify-end gap-2"><button type="button" className={BTN} onClick={onClose}>取消</button><button className={BTN_PRIMARY}>儲存</button></div>
+      </form>
+    </Modal>
+  );
+}
+
+function QuickTaskModal({ store, onClose }) {
+  const { subjects } = store.data.settings;
+  const [cs, setCs] = useState({ category: subjects[0]?.category || '', subject: subjects[0]?.name || '' });
+  const [title, setTitle] = useState(''); const [est, setEst] = useState('1'); const [save, setSave] = useState(true);
+  return (
+    <Modal title="＋ 插入今日臨時任務" onClose={onClose}>
+      <form className="space-y-3" onSubmit={e => {
+        e.preventDefault(); if (!title.trim() || !cs.category) return;
+        const T = todayStr(); const h = parseFloat(est);
+        store.addTasks([{ id: uid(), ...cs, title: title.trim(), estHours: isNaN(h) ? 1 : r2(h), note: '', status: 'scheduled', assignedDate: T, assignedWeek: isoWeek(parseYmd(T)), assignedMonth: T.slice(0, 7), adhoc: !save }]);
+        onClose();
+      }}>
+        <div><label className={LABEL}>科目</label><SubjectSelect subjects={subjects} category={cs.category} subject={cs.subject} onChange={(category, subject) => setCs({ category, subject })} /></div>
+        <div><label className={LABEL}>任務名稱</label><input className={INPUT} value={title} onChange={e => setTitle(e.target.value)} autoFocus placeholder="例：補看老師加開的釋字解析" /></div>
+        <div><label className={LABEL}>預估工時（hr）</label><input type="number" step="0.25" min="0" className={INPUT} value={est} onChange={e => setEst(e.target.value)} /></div>
+        <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={save} onChange={e => setSave(e.target.checked)} />同步存入總資料庫（計入各科整體進度）</label>
+        <div className="flex justify-end gap-2"><button type="button" className={BTN} onClick={onClose}>取消</button><button className={BTN_PRIMARY}>落入今天</button></div>
+      </form>
+    </Modal>
+  );
+}
+
+/* ====================== App 外框 ====================== */
+function SettingsMenu({ store }) {
+  const [open, setOpen] = useState(false);
+  const fileRef = useRef();
+  const ref = useRef();
+  useEffect(() => {
+    const h = e => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener('mousedown', h); return () => document.removeEventListener('mousedown', h);
+  }, []);
+  const item = 'w-full text-left px-3 py-2 text-sm hover:bg-[#F6F3EE] rounded-md';
+  return (
+    <div className="relative" ref={ref}>
+      <button className={BTN} onClick={() => setOpen(o => !o)}>⚙️ 設定</button>
+      {open && (
+        <div className="absolute right-0 mt-1 w-56 bg-white border border-line rounded-lg shadow-[0_8px_30px_rgba(45,43,42,.1)] p-1 z-50">
+          <button className={item} onClick={() => { downloadFile(`law-study-os-backup-${todayStr()}.json`, JSON.stringify(store.data, null, 2)); setOpen(false); }}>⬇ 匯出 JSON 備份</button>
+          <button className={item} onClick={() => fileRef.current.click()}>⬆ 匯入還原 JSON</button>
+          <button className={item} onClick={() => {
+            try {
+              const b = JSON.parse(localStorage.getItem(BACKUP_KEY) || 'null');
+              if (!b?.data) { alert('目前沒有快照'); return; }
+              if (confirm(`還原到上一步快照（${new Date(b.savedAt).toLocaleString()}）？`)) store.replaceAll(b.data);
+            } catch (e) { alert('快照讀取失敗'); }
+            setOpen(false);
+          }}>↶ 還原上一步快照</button>
+          <div className="border-t border-line my-1" />
+          <button className={`${item} text-brick`} onClick={() => { if (confirm('清除所有資料並重新載入範例？建議先匯出備份。')) store.replaceAll(seedData()); setOpen(false); }}>重設為範例資料</button>
+        </div>
+      )}
+      <input ref={fileRef} type="file" accept="application/json,.json" className="hidden" onChange={e => {
+        const f = e.target.files?.[0]; e.target.value = ''; if (!f) return;
+        const rd = new FileReader();
+        rd.onload = () => {
+          try {
+            const d = JSON.parse(rd.result);
+            if (!d || !Array.isArray(d.tasks)) throw new Error('格式不符');
+            if (confirm(`匯入 ${d.tasks.length} 筆任務並取代目前所有資料？`)) store.replaceAll(d);
+          } catch (err) { alert('匯入失敗：檔案不是有效的備份 JSON'); }
+          setOpen(false);
+        };
+        rd.readAsText(f);
+      }} />
+    </div>
+  );
+}
+
+function SavedFlash({ tick }) {
+  if (!tick) return null;
+  return <div key={tick} className="saved-flash fixed top-3 right-4 z-[60] text-xs text-sub bg-white/90 border border-line rounded-full px-3 py-1 pointer-events-none">✓ 已自動儲存</div>;
+}
+
+function App() {
+  const store = useStore();
+  const [page, setPage] = useState(() => { try { return localStorage.getItem('LAW_STUDY_OS_PAGE') || 'home'; } catch (e) { return 'home'; } });
+  useEffect(() => { try { localStorage.setItem('LAW_STUDY_OS_PAGE', page); } catch (e) { } }, [page]);
+  const tabs = [['home', '首頁'], ['week', '當週排程'], ['db', '任務總庫']];
+  return (
+    <div className="min-h-screen">
+      <header className="sticky top-0 z-30 bg-paper/90 backdrop-blur border-b border-line">
+        <div className="max-w-[1400px] mx-auto px-4 py-3 flex flex-wrap items-center gap-3">
+          <div className="flex items-center gap-2 mr-2">
+            <span className="w-6 h-6 rounded-md border border-ink flex items-center justify-center text-[11px]">律</span>
+            <span className="font-medium tracking-wide">司律讀書儀表板</span>
+          </div>
+          <nav className="flex p-0.5 bg-white border border-line rounded-lg">
+            {tabs.map(([k, l]) => (
+              <button key={k} onClick={() => setPage(k)} className={`px-3.5 py-1 text-sm rounded-md transition ${page === k ? 'bg-ink text-white' : 'text-sub hover:text-ink'}`}>{l}</button>
+            ))}
+          </nav>
+          <div className="flex-1" />
+          <SettingsMenu store={store} />
+        </div>
+      </header>
+      <main className="max-w-[1400px] mx-auto px-4 py-5">
+        {page === 'home' && <HomePage store={store} goWeek={() => setPage('week')} />}
+        {page === 'week' && <WeekPage store={store} />}
+        {page === 'db' && <DatabasePage store={store} />}
+      </main>
+      <SavedFlash tick={store.savedTick} />
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
