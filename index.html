@@ -83,6 +83,23 @@ const colorOf = (cat, subjects) => {
 };
 const countsInSubject = t => !t.isBuffer && !t.adhoc;
 
+/* ---------- 階段工程（Stage-Gate Phases）工具 ---------- */
+const addMonths = (ym, n) => { const [y, m] = ym.split('-').map(Number); return ymOf(new Date(y, m - 1 + n, 1)); };
+const lastDayOf = ym => { const [y, m] = ym.split('-').map(Number); return ymd(new Date(y, m, 0)); };
+const monthsBetween = (a, b) => { const out = []; if (!a || !b || a > b) return out; for (let s = a; s <= b && out.length < 120; s = addMonths(s, 1)) out.push(s); return out; };
+const phaseOfMonth = (phases, ym) => (ym ? phases.find(p => p.startMonth <= ym && ym <= p.endMonth) : undefined);
+const currentPhase = phases => { const M = ymOf(new Date()); return phaseOfMonth(phases, M) || phases.find(p => p.startMonth > M) || phases[phases.length - 1]; };
+const phaseShort = name => (name || '').split(/[：:]/)[0].trim();
+const fmtYM = ym => (ym ? `${ym.slice(0, 4)}/${+ym.slice(5)}` : '');
+function defaultPhases() {
+  const M = ymOf(new Date());
+  return [
+    { id: uid(), name: 'Phase 1：全科打底期', startMonth: M, endMonth: addMonths(M, 3) },
+    { id: uid(), name: 'Phase 2：考古題演練期', startMonth: addMonths(M, 4), endMonth: addMonths(M, 7) },
+    { id: uid(), name: 'Phase 3：衝刺總複習期', startMonth: addMonths(M, 8), endMonth: addMonths(M, 9) },
+  ];
+}
+
 /* ====================== 範例資料 ====================== */
 function defaultSettings() {
   return {
@@ -92,6 +109,7 @@ function defaultSettings() {
     weeklyCapacityLimit: 42,
     scratchpadMemo: '',
     subjects: DEFAULT_SUBJECTS.map(s => ({ ...s, id: uid() })),
+    phases: defaultPhases(),
   };
 }
 
@@ -100,7 +118,8 @@ function seedData() {
   const T = ymd(now), Y = ymd(addDays(now, -1)), TM = ymd(addDays(now, 1)), M = ymOf(now);
   const sched = date => ({ status: 'scheduled', assignedMonth: date.slice(0, 7), assignedDate: date, assignedWeek: isoWeek(parseYmd(date)) });
   const month = { status: 'in_month', assignedMonth: M };
-  const mk = (category, subject, title, estHours, extra = {}) => ({ id: uid(), category, subject, title, estHours, note: '', status: 'backlog', ...extra });
+  const settings = defaultSettings(); const P1 = settings.phases[0].id;
+  const mk = (category, subject, title, estHours, extra = {}) => ({ id: uid(), phaseId: P1, category, subject, title, estHours, note: '', status: 'backlog', ...extra });
   const tasks = [
     mk('民事法', '民法', '總則：權利能力與行為能力', 3, sched(T)),
     mk('民事法', '民法', '債總：契約之成立與效力', 4, month),
@@ -133,16 +152,22 @@ function seedData() {
     ] },
     { id: uid(), title: '歷屆試題 PDF', url: 'https://drive.google.com/', children: [] },
   ];
-  return { tasks, drive, settings: defaultSettings() };
+  return { tasks, drive, settings };
 }
 
 function normalize(d) {
   const base = defaultSettings();
   const s = d.settings || {};
+  const phases = Array.isArray(s.phases) ? s.phases : base.phases;
+  // 舊資料遷移：沒有 phaseId 的任務，依所屬月份（或今天）歸入對應階段
+  const fallback = (currentPhase(phases) || {}).id;
+  const tasks = (Array.isArray(d.tasks) ? d.tasks : []).map(t => t.phaseId ? t : {
+    ...t, phaseId: (phaseOfMonth(phases, t.assignedMonth || (t.assignedDate || '').slice(0, 7)) || {}).id || fallback,
+  });
   return {
-    tasks: Array.isArray(d.tasks) ? d.tasks : [],
+    tasks,
     drive: Array.isArray(d.drive) ? d.drive : [],
-    settings: { ...base, ...s, subjects: Array.isArray(s.subjects) ? s.subjects : base.subjects },
+    settings: { ...base, ...s, subjects: Array.isArray(s.subjects) ? s.subjects : base.subjects, phases },
   };
 }
 function loadData() {
@@ -335,6 +360,9 @@ function HomePage({ store, goWeek }) {
   const [completing, setCompleting] = useState(null);
   const [editExam, setEditExam] = useState(false);
   const T = todayStr(); const now = new Date(); const M = ymOf(now);
+  const { phases } = settings;
+  const [phaseId, setPhaseId] = useState(() => (currentPhase(phases) || {}).id || '');
+  const phase = phases.find(p => p.id === phaseId) || currentPhase(phases);
 
   const todays = tasks.filter(t => t.assignedDate === T).sort((a, b) => (a.status === 'completed') - (b.status === 'completed'));
   const doneToday = todays.filter(t => t.status === 'completed');
@@ -375,7 +403,7 @@ function HomePage({ store, goWeek }) {
       {/* 左：Drive */}
       <div className="order-3 lg:order-none space-y-5">
         <DrivePanel store={store} />
-        <SubjectProgress tasks={tasks} subjects={subjects} />
+        <SubjectProgress tasks={tasks} subjects={subjects} phase={phase} />
       </div>
 
       {/* 中：今日執行 */}
@@ -420,6 +448,7 @@ function HomePage({ store, goWeek }) {
 
       {/* 右：進度 + 備忘錄 */}
       <div className="space-y-5 order-2 lg:order-none">
+        <PhasePanel tasks={tasks} phases={phases} phase={phase} onSelect={setPhaseId} />
         <div className={`${CARD} p-5 space-y-4`}>
           <div>
             <div className="flex justify-between text-sm mb-1.5"><span>今日進度</span><span className="text-sub">{Math.round(pctOf(doneH, total))}%</span></div>
@@ -458,13 +487,55 @@ function ExamModal({ store, onClose }) {
   );
 }
 
-function SubjectProgress({ tasks, subjects }) {
-  const [open, setOpen] = useState({});
-  const cats = categoriesOf(subjects);
-  const valid = tasks.filter(countsInSubject);
+function PhasePanel({ tasks, phases, phase, onSelect }) {
+  if (!phase) return (
+    <div className={`${CARD} p-5 text-sm text-sub`}>尚未設定階段，請到「任務總庫 → ⚙️ 管理階段」建立。</div>
+  );
+  const T = todayStr();
+  const pt = tasks.filter(t => countsInSubject(t) && t.phaseId === phase.id);
+  const tot = sumEst(pt), dn = sumEst(pt.filter(t => t.status === 'completed'));
+  const remain = r2(tot - dn);
+  const deadline = lastDayOf(phase.endMonth);
+  const startDay = `${phase.startMonth}-01`;
+  const daysLeft = Math.floor((parseYmd(deadline) - parseYmd(T)) / 864e5) + 1; // 含今天
+  const notStarted = T < startDay;
+  const span = (parseYmd(deadline) - parseYmd(startDay)) / 864e5 + 1;
+  const elapsed = notStarted ? 0 : Math.min(100, ((parseYmd(T) - parseYmd(startDay)) / 864e5 + 1) / span * 100);
+  const pct = pctOf(dn, tot);
+  const perDay = daysLeft > 0 ? r2(remain / (notStarted ? span : daysLeft)) : null;
   return (
     <div className={`${CARD} p-5`}>
-      <h3 className="text-sm font-medium mb-3">各科整體進度</h3>
+      <select className={`${INPUT} !text-sm font-medium mb-4`} value={phase.id} onChange={e => onSelect(e.target.value)}>
+        {phases.map(p => <option key={p.id} value={p.id}>{p.name}（{fmtYM(p.startMonth)}–{fmtYM(p.endMonth)}）</option>)}
+      </select>
+      <div className="flex justify-between text-sm mb-1.5"><span>階段工程進度</span><span className="text-sub">{Math.round(pct)}%</span></div>
+      <ProgressBar pct={pct} marker={elapsed} />
+      <div className="text-[11px] text-sub mt-1 flex justify-between">
+        <span>{dn} / {tot} hr</span>
+        <span className={!notStarted && pct + 0.01 < elapsed ? 'text-brick' : ''}>時間已過 {Math.round(elapsed)}%</span>
+      </div>
+      <div className="grid grid-cols-2 gap-2 mt-4">
+        <div className="rounded-lg bg-paper border border-line px-3 py-2">
+          <div className="text-[11px] text-sub">階段死線 {deadline.slice(5).replace('-', '/')}</div>
+          <div className="text-lg font-light mt-0.5">{daysLeft > 0 ? (notStarted ? `尚未開始` : <>剩 {daysLeft} 天</>) : <span className="text-brick">已過死線</span>}</div>
+        </div>
+        <div className="rounded-lg bg-paper border border-line px-3 py-2">
+          <div className="text-[11px] text-sub">每日最低應推進</div>
+          <div className="text-lg font-light mt-0.5">{remain <= 0 ? '已完成 ✓' : perDay == null ? <span className="text-brick">{remain} hr 未完成</span> : <>{perDay} <span className="text-xs text-sub">hr/天</span></>}</div>
+        </div>
+      </div>
+      <div className="text-[11px] text-sub mt-2">未完成 {remain} hr{daysLeft > 0 && remain > 0 ? ` ÷ ${notStarted ? Math.round(span) : daysLeft} 天` : ''}</div>
+    </div>
+  );
+}
+
+function SubjectProgress({ tasks, subjects, phase }) {
+  const [open, setOpen] = useState({});
+  const cats = categoriesOf(subjects);
+  const valid = tasks.filter(t => countsInSubject(t) && (!phase || t.phaseId === phase.id));
+  return (
+    <div className={`${CARD} p-5`}>
+      <h3 className="text-sm font-medium mb-3">各科進度{phase && <span className="ml-1.5 text-xs font-normal text-sub">· {phaseShort(phase.name)}</span>}</h3>
       <div className="space-y-3">
         {cats.map(cat => {
           const c = colorOf(cat, subjects);
@@ -684,7 +755,7 @@ function statusLabel(t) {
 }
 
 function DatabasePage({ store }) {
-  const { tasks, settings } = store.data; const { subjects } = settings;
+  const { tasks, settings } = store.data; const { subjects, phases } = settings;
   const cats = categoriesOf(subjects);
   const [tab, setTab] = useState('全部');
   const [q, setQ] = useState('');
@@ -692,10 +763,26 @@ function DatabasePage({ store }) {
   const [sel, setSel] = useState(new Set());
   const [grid, setGrid] = useState(false);
   const [mgr, setMgr] = useState(false);
-  const [month, setMonth] = useState(ymOf(new Date()));
+  const [phaseMgr, setPhaseMgr] = useState(false);
+  const [phaseTab, setPhaseTab] = useState(() => (currentPhase(phases) || {}).id || '__none__');
+  const [movePhase, setMovePhase] = useState('');
+
+  const phaseIds = new Set(phases.map(p => p.id));
+  const orphanCount = tasks.filter(t => countsInSubject(t) && !phaseIds.has(t.phaseId)).length;
+  const activePhase = phases.find(p => p.id === phaseTab);
+  // 目前的頁籤若被刪除，自動切回現行階段
+  useEffect(() => {
+    if (phaseTab === '__none__' ? (orphanCount === 0 && phases.length > 0) : !activePhase) setPhaseTab((currentPhase(phases) || {}).id || '__none__');
+  }, [phaseTab, activePhase, orphanCount, phases]);
+  useEffect(() => { setSel(new Set()); }, [phaseTab]);
+
+  const monthOptions = activePhase ? monthsBetween(activePhase.startMonth, activePhase.endMonth) : [];
+  const defaultMonth = monthOptions.includes(ymOf(new Date())) ? ymOf(new Date()) : monthOptions[0] || ymOf(new Date());
+  const [month, setMonth] = useState(defaultMonth);
+  useEffect(() => { setMonth(defaultMonth); }, [phaseTab, activePhase?.startMonth, activePhase?.endMonth]);
 
   const order = useMemo(() => { const m = {}; subjects.forEach((s, i) => { m[`${s.category}||${s.name}`] = i; }); return m; }, [subjects]);
-  const all = tasks.filter(countsInSubject);
+  const all = tasks.filter(countsInSubject).filter(t => (phaseTab === '__none__' ? !phaseIds.has(t.phaseId) : t.phaseId === phaseTab));
   const rows = all
     .filter(t => tab === '全部' || t.category === tab)
     .filter(t => !q || `${t.title} ${t.subject} ${t.note || ''}`.toLowerCase().includes(q.toLowerCase()))
@@ -714,9 +801,37 @@ function DatabasePage({ store }) {
 
   return (
     <div className="pb-24">
+      {/* 階段切換列 */}
+      <div className="flex items-stretch gap-2 mb-4">
+        <div className="flex-1 flex gap-2 overflow-x-auto thin-scroll pb-1">
+          {phases.map(p => {
+            const pt = tasks.filter(t => countsInSubject(t) && t.phaseId === p.id);
+            const tot = sumEst(pt), dn = sumEst(pt.filter(t => t.status === 'completed'));
+            const active = phaseTab === p.id; const isNow = currentPhase(phases)?.id === p.id && phaseOfMonth(phases, ymOf(new Date()));
+            return (
+              <button key={p.id} onClick={() => setPhaseTab(p.id)}
+                className={`text-left min-w-[190px] px-3.5 py-2.5 rounded-lg border transition ${active ? 'bg-ink border-ink text-white' : 'bg-white border-line hover:border-[#D6CEC2]'}`}>
+                <div className="text-sm font-medium truncate">{p.name}{isNow && <span className={`ml-1.5 text-[10px] px-1 rounded ${active ? 'bg-white/20' : 'bg-[#F3F0EA] text-sub'}`}>進行中</span>}</div>
+                <div className={`text-[11px] mt-0.5 ${active ? 'text-white/70' : 'text-sub'}`}>{fmtYM(p.startMonth)} – {fmtYM(p.endMonth)} · {pt.length} 筆 · {Math.round(pctOf(dn, tot))}%</div>
+              </button>
+            );
+          })}
+          {orphanCount > 0 && (
+            <button onClick={() => setPhaseTab('__none__')} className={`text-left min-w-[150px] px-3.5 py-2.5 rounded-lg border border-dashed transition ${phaseTab === '__none__' ? 'bg-ink border-ink text-white' : 'bg-white border-[#EAD5D5] text-brick'}`}>
+              <div className="text-sm font-medium">未分階段</div>
+              <div className="text-[11px] mt-0.5 opacity-70">{orphanCount} 筆待歸入階段</div>
+            </button>
+          )}
+        </div>
+        <button className={`${BTN} self-start`} onClick={() => setPhaseMgr(true)}>⚙️ 管理階段</button>
+      </div>
+
+      {phases.length === 0 && orphanCount === 0 ? (
+        <div className={`${CARD} p-10 text-center text-sm text-sub`}>還沒有任何階段。<br /><button className={`${BTN_PRIMARY} mt-3`} onClick={() => setPhaseMgr(true)}>＋ 建立第一個階段</button></div>
+      ) : (<>
       <div className="flex flex-wrap items-center gap-2 mb-4">
-        <h2 className="text-lg font-medium mr-2">任務總庫</h2>
-        <button className={grid ? BTN_PRIMARY : BTN} onClick={() => setGrid(g => !g)}>📊 {grid ? '收合批次表格' : '開啟批次表格編輯'}</button>
+        <h2 className="text-lg font-medium mr-2">{activePhase ? activePhase.name : '未分階段任務'}</h2>
+        {activePhase && <button className={grid ? BTN_PRIMARY : BTN} onClick={() => setGrid(g => !g)}>📊 {grid ? '收合批次表格' : '開啟批次表格編輯'}</button>}
         <button className={BTN} onClick={() => setMgr(true)}>⚙️ 管理科目</button>
         <div className="flex-1" />
         <input className={`${INPUT} !w-48`} placeholder="搜尋章節／備註…" value={q} onChange={e => setQ(e.target.value)} />
@@ -725,7 +840,7 @@ function DatabasePage({ store }) {
         </select>
       </div>
 
-      {grid && <GridEditor store={store} onClose={() => setGrid(false)} />}
+      {grid && activePhase && <GridEditor key={activePhase.id} store={store} phase={activePhase} onClose={() => setGrid(false)} />}
 
       <div className="flex gap-1 overflow-x-auto thin-scroll mb-3 border-b border-line">
         {['全部', ...cats].map(c => {
@@ -786,16 +901,88 @@ function DatabasePage({ store }) {
         <div className="fixed bottom-5 left-1/2 -translate-x-1/2 z-40 w-[calc(100%-32px)] max-w-3xl bg-white border border-line rounded-xl shadow-[0_8px_30px_rgba(45,43,42,.12)] px-4 py-3 flex flex-wrap items-center gap-2">
           <span className="text-sm mr-1">已選 <b>{selIds.length}</b> 筆 · {sumEst(tasks.filter(t => sel.has(t.id)))} hr</span>
           <div className="flex-1" />
-          <input type="month" className={`${INPUT} !w-40`} value={month} onChange={e => setMonth(e.target.value)} />
-          <button className={BTN_PRIMARY} disabled={!month} onClick={assignMonth}>📅 指派至月份池</button>
+          {activePhase ? (
+            <select className={`${INPUT} !w-32`} value={month} onChange={e => setMonth(e.target.value)} title={`限 ${activePhase.name} 期間`}>
+              {monthOptions.map(m => <option key={m} value={m}>{fmtYM(m)}</option>)}
+            </select>
+          ) : <span className="text-xs text-sub">先移入階段才能指派月份</span>}
+          {activePhase && <button className={BTN_PRIMARY} disabled={!month} onClick={assignMonth}>📅 指派至月份池</button>}
+          <select className={`${INPUT} !w-36`} value={movePhase} onChange={e => {
+            const pid = e.target.value; if (!pid) return;
+            const p = phases.find(x => x.id === pid);
+            store.updateTasks(selIds, t => ({ phaseId: pid, ...(t.assignedMonth && t.status !== 'completed' && !t.assignedDate && !(p.startMonth <= t.assignedMonth && t.assignedMonth <= p.endMonth) ? { assignedMonth: undefined, status: 'backlog' } : {}) }));
+            setSel(new Set()); setMovePhase('');
+          }}>
+            <option value="">↪ 移至階段…</option>
+            {phases.filter(p => p.id !== phaseTab).map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+          </select>
           <button className={BTN} onClick={() => { store.updateTasks(selIds, t => t.status === 'completed' ? {} : { assignedMonth: undefined, assignedDate: undefined, assignedWeek: undefined, status: 'backlog', splitPending: false }); setSel(new Set()); }}>↩ 移回未指派</button>
           <button className={`${BTN} !text-brick`} onClick={() => { if (confirm(`確定刪除 ${selIds.length} 筆任務？此動作無法復原（可從設定的快照還原上一步）。`)) { store.deleteTasks(selIds); setSel(new Set()); } }}>🗑️ 批次刪除</button>
           <button className={BTN_GHOST} title="取消選取" onClick={() => setSel(new Set())}>✕</button>
         </div>
       )}
 
+      </>)}
+
       {mgr && <SubjectManager store={store} onClose={() => setMgr(false)} />}
+      {phaseMgr && <PhaseManager store={store} onClose={() => setPhaseMgr(false)} />}
     </div>
+  );
+}
+
+/* ---------- 階段管理 ---------- */
+function PhaseManager({ store, onClose }) {
+  const { phases } = store.data.settings; const tasks = store.data.tasks;
+  const last = phases[phases.length - 1];
+  const [name, setName] = useState('');
+  const [start, setStart] = useState(last ? addMonths(last.endMonth, 1) : ymOf(new Date()));
+  const [end, setEnd] = useState(last ? addMonths(last.endMonth, 3) : addMonths(ymOf(new Date()), 2));
+  const update = (id, patch) => store.setSettings(s => ({ phases: s.phases.map(p => (p.id === id ? { ...p, ...patch } : p)) }));
+  const setRange = (p, key, v) => {
+    if (!v) return;
+    const next = { ...p, [key]: v };
+    if (next.startMonth > next.endMonth) { alert('起始月份不能晚於結束月份'); return; }
+    update(p.id, { [key]: v });
+  };
+  const del = p => {
+    const n = tasks.filter(t => t.phaseId === p.id).length;
+    if (!confirm(`刪除階段「${p.name}」？${n ? `\n其下 ${n} 筆任務不會被刪除，會移到「未分階段」等待重新歸類。` : ''}`)) return;
+    store.setSettings(s => ({ phases: s.phases.filter(x => x.id !== p.id) }));
+  };
+  const cell = 'bg-transparent px-1.5 py-1 rounded outline-none hover:bg-[#F6F3EE] focus:bg-white focus:ring-1 focus:ring-[#D6CEC2]';
+  const overlaps = phases.some((a, i) => phases.some((b, j) => i < j && a.startMonth <= b.endMonth && b.startMonth <= a.endMonth));
+  return (
+    <Modal title="⚙️ 管理階段" onClose={onClose} width="max-w-3xl">
+      <div className="text-xs text-sub mb-3">每個階段的結束月份最後一天就是該階段的死線。點名稱可直接改名，月份修改即時生效。</div>
+      <div className="space-y-2">
+        {phases.map(p => {
+          const n = tasks.filter(t => t.phaseId === p.id).length;
+          return (
+            <div key={p.id} className="flex flex-wrap items-center gap-2 border border-line rounded-lg p-2.5">
+              <Editable value={p.name} onCommit={v => v.trim() && update(p.id, { name: v.trim() })} className={`${cell} font-medium flex-1 min-w-[180px]`} />
+              <input type="month" className={`${INPUT} !w-36`} value={p.startMonth} onChange={e => setRange(p, 'startMonth', e.target.value)} />
+              <span className="text-sub text-xs">至</span>
+              <input type="month" className={`${INPUT} !w-36`} value={p.endMonth} onChange={e => setRange(p, 'endMonth', e.target.value)} />
+              <span className="text-[11px] text-sub w-24 text-right">死線 {lastDayOf(p.endMonth).slice(5).replace('-', '/')} · {n} 筆</span>
+              <button className={`${BTN_GHOST} hover:!text-brick`} title="刪除階段" onClick={() => del(p)}>🗑</button>
+            </div>
+          );
+        })}
+        {phases.length === 0 && <div className="text-sm text-sub text-center py-4">尚無階段</div>}
+      </div>
+      {overlaps && <div className="text-xs text-brick mt-2">⚠️ 有階段的月份互相重疊，首頁預設階段會以排在前面的為準。</div>}
+      <form className="mt-4 pt-4 border-t border-line flex flex-wrap gap-2 items-end" onSubmit={e => {
+        e.preventDefault(); if (!name.trim() || !start || !end) return;
+        if (start > end) { alert('起始月份不能晚於結束月份'); return; }
+        store.setSettings(s => ({ phases: [...s.phases, { id: uid(), name: name.trim(), startMonth: start, endMonth: end }] }));
+        setName(''); setStart(addMonths(end, 1)); setEnd(addMonths(end, 3));
+      }}>
+        <div className="flex-1 min-w-[180px]"><label className={LABEL}>新增階段名稱</label><input className={INPUT} value={name} onChange={e => setName(e.target.value)} placeholder={`Phase ${phases.length + 1}：…`} /></div>
+        <div><label className={LABEL}>起始月份</label><input type="month" className={`${INPUT} !w-36`} value={start} onChange={e => setStart(e.target.value)} /></div>
+        <div><label className={LABEL}>結束月份</label><input type="month" className={`${INPUT} !w-36`} value={end} onChange={e => setEnd(e.target.value)} /></div>
+        <button className={BTN_PRIMARY} disabled={!name.trim()}>＋ 新增</button>
+      </form>
+    </Modal>
   );
 }
 
@@ -803,7 +990,7 @@ function DatabasePage({ store }) {
 const COLS = ['category', 'subject', 'title', 'est', 'note'];
 const emptyRow = () => ({ category: '', subject: '', title: '', est: '', note: '' });
 
-function GridEditor({ store, onClose }) {
+function GridEditor({ store, phase, onClose }) {
   const { subjects } = store.data.settings;
   const cats = categoriesOf(subjects);
   const [rows, setRows] = useState(() => Array.from({ length: 15 }, emptyRow));
@@ -866,7 +1053,7 @@ function GridEditor({ store, onClose }) {
   const commit = () => {
     if (!filled.length) { alert('沒有可寫入的列（章節名稱為空的列會自動忽略）。'); return; }
     if (invalid.length && !confirm(`有 ${invalid.length} 列的大類／子科無法辨識，將略過這些列。繼續寫入其餘 ${filled.length - invalid.length} 列？`)) return;
-    const news = filled.map(r => { const cs = resolve(r); if (!cs) return null; const est = parseFloat(r.est); return { id: uid(), ...cs, title: r.title.trim(), estHours: isNaN(est) ? 1 : r2(est), note: r.note.trim(), status: 'backlog' }; }).filter(Boolean);
+    const news = filled.map(r => { const cs = resolve(r); if (!cs) return null; const est = parseFloat(r.est); return { id: uid(), phaseId: phase.id, ...cs, title: r.title.trim(), estHours: isNaN(est) ? 1 : r2(est), note: r.note.trim(), status: 'backlog' }; }).filter(Boolean);
     store.addTasks(news);
     setRows(Array.from({ length: 15 }, emptyRow));
     onClose();
@@ -876,7 +1063,7 @@ function GridEditor({ store, onClose }) {
   return (
     <div className={`${CARD} p-4 mb-5`}>
       <div className="flex flex-wrap items-center gap-2 mb-3">
-        <div className="text-sm font-medium">批次表格編輯</div>
+        <div className="text-sm font-medium">批次表格編輯 <span className="ml-1 text-xs font-normal px-1.5 py-0.5 rounded bg-[#F3F0EA] text-sub">寫入：{phase.name}</span></div>
         <div className="text-xs text-sub">Tab 向右 · Enter 向下 · 可從 Excel／Google Sheets 框選多列直接 Ctrl+V 貼上</div>
         <div className="flex-1" />
         <button className={BTN} onClick={onClose}>✕ 取消</button>
@@ -1033,8 +1220,9 @@ function DropZone({ onDropTask, className = '', children }) {
   );
 }
 
-function KanbanCard({ task, subjects, onUnschedule, onComplete, onUncomplete, compact }) {
+function KanbanCard({ task, subjects, phases = [], onUnschedule, onComplete, onUncomplete, compact }) {
   const done = task.status === 'completed';
+  const phaseName = task.isBuffer ? '' : phaseShort(phases.find(p => p.id === task.phaseId)?.name);
   const c = task.isBuffer ? NEUTRAL : colorOf(task.category, subjects);
   return (
     <div
@@ -1055,6 +1243,7 @@ function KanbanCard({ task, subjects, onUnschedule, onComplete, onUncomplete, co
         <span>{task.isBuffer ? '緩衝' : task.subject}{!compact && task.assignedDate && task.assignedDate < todayStr() && !done ? ` · 原 ${fmtMD(task.assignedDate)}` : ''}</span>
         <span>{task.estHours}h{done && task.actualHours != null ? ` / 實 ${task.actualHours}h` : ''}</span>
       </div>
+      {phaseName && <div className="mt-0.5 text-[10px] text-[#A39C94] truncate">{phaseName}</div>}
     </div>
   );
 }
@@ -1132,7 +1321,7 @@ function WeekPage({ store }) {
           <div className="px-4 pb-3">
             {overdue.length === 0 ? <div className="text-xs text-sub pb-1">沒有過期任務，很好 ✓</div> : (
               <div className="grid gap-2 grid-cols-[repeat(auto-fill,minmax(180px,1fr))]">
-                {overdue.map(t => <KanbanCard key={t.id} task={t} subjects={subjects} onUnschedule={() => toPool(t.id)} onComplete={() => setCompleting(t)} />)}
+                {overdue.map(t => <KanbanCard key={t.id} task={t} subjects={subjects} phases={settings.phases} onUnschedule={() => toPool(t.id)} onComplete={() => setCompleting(t)} />)}
               </div>
             )}
           </div>
@@ -1155,7 +1344,7 @@ function WeekPage({ store }) {
             {pool.length === 0 && <div className="text-xs text-sub text-center py-6">沒有待排任務<br />（到任務總庫勾選後「指派至月份池」）</div>}
             {pool.map(t => (
               <div key={t.id} className="relative">
-                <KanbanCard task={t} subjects={subjects} compact />
+                <KanbanCard task={t} subjects={subjects} phases={settings.phases} compact />
                 {t.isBuffer && <button className="absolute top-1 right-1 w-4 h-4 text-[10px] text-sub hover:text-brick" title="刪除緩衝塊" onClick={() => store.deleteTasks([t.id])}>✕</button>}
               </div>
             ))}
@@ -1198,7 +1387,7 @@ function WeekPage({ store }) {
                   </div>
                   <div className="space-y-1.5 flex-1">
                     {list.map(t => (
-                      <KanbanCard key={t.id} task={t} subjects={subjects} compact
+                      <KanbanCard key={t.id} task={t} subjects={subjects} phases={settings.phases} compact
                         onUnschedule={() => toPool(t.id)}
                         onComplete={() => setCompleting(t)}
                         onUncomplete={() => store.uncompleteTask(t.id)} />
@@ -1241,7 +1430,7 @@ function QuickTaskModal({ store, onClose }) {
       <form className="space-y-3" onSubmit={e => {
         e.preventDefault(); if (!title.trim() || !cs.category) return;
         const T = todayStr(); const h = parseFloat(est);
-        store.addTasks([{ id: uid(), ...cs, title: title.trim(), estHours: isNaN(h) ? 1 : r2(h), note: '', status: 'scheduled', assignedDate: T, assignedWeek: isoWeek(parseYmd(T)), assignedMonth: T.slice(0, 7), adhoc: !save }]);
+        store.addTasks([{ id: uid(), phaseId: (phaseOfMonth(store.data.settings.phases, T.slice(0, 7)) || currentPhase(store.data.settings.phases) || {}).id, ...cs, title: title.trim(), estHours: isNaN(h) ? 1 : r2(h), note: '', status: 'scheduled', assignedDate: T, assignedWeek: isoWeek(parseYmd(T)), assignedMonth: T.slice(0, 7), adhoc: !save }]);
         onClose();
       }}>
         <div><label className={LABEL}>科目</label><SubjectSelect subjects={subjects} category={cs.category} subject={cs.subject} onChange={(category, subject) => setCs({ category, subject })} /></div>
