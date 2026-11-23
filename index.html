@@ -631,7 +631,7 @@ function DrivePanel({ store }) {
   const [form, setForm] = useState(null); // {mode:'add'|'edit', node?, parentId?}
   const Node = ({ n, depth }) => {
     const hasKids = n.children && n.children.length > 0;
-    const isOpen = !collapsed[n.id];
+    const isOpen = collapsed[n.id] === false; // 預設全部收合，點擊後才展開
     return (
       <div>
         <div className="group flex items-center gap-1 rounded-md hover:bg-[#F6F3EE] pr-1" style={{ paddingLeft: depth * 14 }}>
