@@ -71,7 +71,40 @@ const isoWeek = d => {
   return `${y}-W${pad(w)}`;
 };
 const todayStr = () => ymd(new Date());
-const r2 = n => Math.round((+n || 0) * 100) / 100;
+const r2 = n => Math.round((+n || 0) * 10) / 10; // 全系統工時一律四捨五入至小數點後一位
+// 單框智能分鐘換算：1.5 → 1.5 hr；45m / 45分 → 0.8 hr；1h30m / 1時30分 → 1.5 hr；無法辨識回傳 null
+function parseDurationInput(raw) {
+  if (raw == null) return null;
+  let s = String(raw).trim().toLowerCase().replace(/\s+/g, '')
+    .replace(/[０-９]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xFEE0)).replace(/[．。]/g, '.');
+  if (!s) return null;
+  if (/^(\d+\.?\d*|\.\d+)$/.test(s)) return r2(parseFloat(s));
+  const m = s.match(/^(?:(\d+\.?\d*|\.\d+)(?:hours?|hrs?|h|小時|時))?(?:(\d+\.?\d*|\.\d+)(?:minutes?|mins?|m|分鐘|分)?)?$/);
+  if (!m || (m[1] == null && m[2] == null)) return null;
+  return r2((parseFloat(m[1]) || 0) + (parseFloat(m[2]) || 0) / 60);
+}
+// 工時輸入框：可打 1.5 或 45m，失焦／Enter 時自動換算成小時
+function DurationInput({ value, onChange, onKeyDown, onBlur, className = INPUT, placeholder = '例: 1.5 或 45m', inputRef, ...rest }) {
+  const normalize = () => { const h = parseDurationInput(value); if (h != null && String(h) !== String(value)) onChange(String(h)); };
+  return (
+    <input ref={inputRef} type="text" autoComplete="off" className={className} placeholder={placeholder} value={value ?? ''}
+      onChange={e => onChange(e.target.value)}
+      onBlur={e => { normalize(); onBlur?.(e); }}
+      onKeyDown={e => { if (e.key === 'Enter') normalize(); onKeyDown?.(e); }} {...rest} />
+  );
+}
+// 表格內直接編輯的工時格：打字時暫存，失焦／Enter 才寫回資料
+function DurationCell({ value, onCommit, className }) {
+  const [draft, setDraft] = useState(String(value ?? ''));
+  const [focused, setFocused] = useState(false);
+  useEffect(() => { if (!focused) setDraft(String(value ?? '')); }, [value, focused]);
+  return (
+    <DurationInput className={className} value={draft} onChange={setDraft}
+      onFocus={() => setFocused(true)}
+      onBlur={() => { setFocused(false); const h = parseDurationInput(draft); if (h == null) setDraft(String(value ?? '')); else if (h !== value) onCommit(h); }}
+      onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur(); }} />
+  );
+}
 const sumEst = arr => r2(arr.reduce((s, t) => s + (+t.estHours || 0), 0));
 const pctOf = (a, b) => (b > 0 ? Math.min(100, (a / b) * 100) : 0);
 const WEEKDAYS = ['一', '二', '三', '四', '五', '六', '日'];
@@ -315,7 +348,7 @@ function CompleteModal({ task, store, onClose }) {
   const p = Math.max(1, Math.min(99, parseFloat(pct) || 0));
   const submit = e => {
     e.preventDefault();
-    const a = parseFloat(actual); const act = isNaN(a) ? task.estHours : a;
+    const a = parseDurationInput(actual); const act = a == null ? task.estHours : a;
     if (mode === 'full') store.completeTask(task.id, act);
     else store.splitTask(task.id, p, act);
     onClose();
@@ -342,7 +375,7 @@ function CompleteModal({ task, store, onClose }) {
         )}
         <div>
           <label className={LABEL}>本次實際花費時間（hr，僅作記錄）</label>
-          <input ref={ref} autoFocus type="number" step="0.25" min="0" className={INPUT} value={actual} onChange={e => setActual(e.target.value)} />
+          <DurationInput inputRef={ref} autoFocus value={actual} onChange={setActual} />
         </div>
         <div className="flex justify-end gap-2 pt-1">
           <button type="button" className={BTN} onClick={onClose}>取消</button>
@@ -886,7 +919,7 @@ function DatabasePage({ store }) {
                     </div>
                   </td>
                   <td className="p-1.5"><input className={`${cell} ${t.status === 'completed' ? 'text-sub' : ''}`} value={t.title} onChange={e => store.updateTask(t.id, { title: e.target.value })} /></td>
-                  <td className="p-1.5"><input type="number" step="0.5" min="0" className={cell} value={t.estHours} onChange={e => store.updateTask(t.id, { estHours: e.target.value === '' ? 0 : r2(parseFloat(e.target.value)) })} /></td>
+                  <td className="p-1.5"><DurationCell className={cell} value={t.estHours} onCommit={h => store.updateTask(t.id, { estHours: h })} /></td>
                   <td className="p-2.5 text-sub">{t.actualHours ?? '—'}</td>
                   <td className="p-1.5"><input className={cell} value={t.note || ''} placeholder="—" onChange={e => store.updateTask(t.id, { note: e.target.value })} /></td>
                   <td className={`p-2.5 text-xs whitespace-nowrap ${st.cls}`}>{st.text}</td>
@@ -945,10 +978,10 @@ function SplitModal({ store, task, onClose }) {
   useEffect(() => { firstRef.current?.focus(); }, []);
 
   const est = r2(task.estHours);
-  const sum = r2(parts.reduce((s, p) => s + (parseFloat(p.est) || 0), 0));
+  const sum = r2(parts.reduce((s, p) => s + (parseDurationInput(p.est) || 0), 0));
   const remain = est - sum;
   const matched = Math.abs(remain) < 0.005;
-  const rowsOk = parts.every(p => p.title.trim() && parseFloat(p.est) > 0);
+  const rowsOk = parts.every(p => p.title.trim() && parseDurationInput(p.est) > 0);
   const canSubmit = parts.length >= 2 && rowsOk && (matched || allowChange);
 
   const set = (key, patch) => setParts(ps => ps.map(p => (p.key === key ? { ...p, ...patch } : p)));
@@ -957,7 +990,7 @@ function SplitModal({ store, task, onClose }) {
     const month = task.assignedMonth || task.assignedDate?.slice(0, 7);
     const news = parts.map(p => ({
       id: uid(), phaseId: task.phaseId, category: task.category, subject: task.subject, note: task.note || '',
-      title: p.title.trim(), estHours: r2(parseFloat(p.est)),
+      title: p.title.trim(), estHours: parseDurationInput(p.est),
       status: month ? 'in_month' : 'backlog', ...(month ? { assignedMonth: month } : {}),
     }));
     store.mutate(d => ({ ...d, tasks: d.tasks.flatMap(x => (x.id === task.id ? news : [x])) }));
@@ -978,12 +1011,12 @@ function SplitModal({ store, task, onClose }) {
       </div>
 
       <div className="space-y-2">
-        <div className="flex gap-2 text-[11px] text-sub px-1"><span className="flex-1">子段落名稱</span><span className="w-24">預估工時</span><span className="w-8" /></div>
+        <div className="flex gap-2 text-[11px] text-sub px-1"><span className="flex-1">子段落名稱</span><span className="w-32">預估工時</span><span className="w-8" /></div>
         {parts.map((p, i) => (
           <div key={p.key} className="flex gap-2 items-center">
             <input ref={i === 0 ? firstRef : null} className={`${INPUT} flex-1`} value={p.title} onChange={e => set(p.key, { title: e.target.value })} placeholder="例：第一編 總則" />
-            <input type="number" step="0.25" min="0" className={`${INPUT} !w-24`} value={p.est} placeholder="hr"
-              onChange={e => set(p.key, { est: e.target.value })}
+            <DurationInput className={`${INPUT} !w-32`} value={p.est}
+              onChange={v => set(p.key, { est: v })}
               onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); canSubmit ? submit() : setParts(ps => [...ps, blank()]); } }} />
             <button className={`${BTN_GHOST} w-8 ${parts.length > 2 ? 'hover:!text-brick' : 'opacity-25 cursor-not-allowed'}`} title="刪除此段" disabled={parts.length <= 2}
               onClick={() => setParts(ps => ps.filter(x => x.key !== p.key))}>✕</button>
@@ -1086,7 +1119,7 @@ function GridEditor({ store, phase, onClose }) {
       const sub = subjects.find(s => s.name === v);
       if (!cats.includes(v) && sub) { next.category = sub.category; next.subject = sub.name; }
       else next.category = v;
-    } else if (col === 'est') next.est = v.replace(/[^\d.]/g, '');
+    } else if (col === 'est') { const h = parseDurationInput(v); next.est = h == null ? v : String(h); }
     else next[col] = v;
     return next;
   };
@@ -1095,6 +1128,7 @@ function GridEditor({ store, phase, onClose }) {
   const onKeyDown = (e, r, c) => {
     if (e.key === 'Enter') {
       e.preventDefault();
+      if (COLS[c] === 'est') setRows(rs => rs.map((x, i) => i === r ? normalizeCell(x, 'est', e.target.value) : x));
       if (r + 1 >= rows.length) setRows(rs => [...rs, ...Array.from({ length: 10 }, emptyRow)]);
       focusCell(r + 1, c);
     }
@@ -1130,7 +1164,7 @@ function GridEditor({ store, phase, onClose }) {
   const commit = () => {
     if (!filled.length) { alert('沒有可寫入的列（章節名稱為空的列會自動忽略）。'); return; }
     if (invalid.length && !confirm(`有 ${invalid.length} 列的大類／子科無法辨識，將略過這些列。繼續寫入其餘 ${filled.length - invalid.length} 列？`)) return;
-    const news = filled.map(r => { const cs = resolve(r); if (!cs) return null; const est = parseFloat(r.est); return { id: uid(), phaseId: phase.id, ...cs, title: r.title.trim(), estHours: isNaN(est) ? 1 : r2(est), note: r.note.trim(), status: 'backlog' }; }).filter(Boolean);
+    const news = filled.map(r => { const cs = resolve(r); if (!cs) return null; const est = parseDurationInput(r.est); return { id: uid(), phaseId: phase.id, ...cs, title: r.title.trim(), estHours: est == null ? 1 : est, note: r.note.trim(), status: 'backlog' }; }).filter(Boolean);
     store.addTasks(news);
     setRows(Array.from({ length: 15 }, emptyRow));
     onClose();
@@ -1157,7 +1191,7 @@ function GridEditor({ store, phase, onClose }) {
               <th className="border border-line w-32 font-normal text-left px-2">大類 ▾</th>
               <th className="border border-line w-36 font-normal text-left px-2">子科 ▾</th>
               <th className="border border-line font-normal text-left px-2">章節名稱</th>
-              <th className="border border-line w-24 font-normal text-left px-2">預估工時</th>
+              <th className="border border-line w-32 font-normal text-left px-2">預估工時</th>
               <th className="border border-line w-56 font-normal text-left px-2">備註</th>
             </tr>
           </thead>
@@ -1174,13 +1208,12 @@ function GridEditor({ store, phase, onClose }) {
                         ref={el => (refs.current[`${r}-${c}`] = el)}
                         className={cellCls}
                         list={col === 'category' ? 'dl-cats' : col === 'subject' ? (ci >= 0 ? `dl-sub-${ci}` : 'dl-sub-all') : undefined}
-                        inputMode={col === 'est' ? 'decimal' : undefined}
-                        value={row[col]}
+                                                value={row[col]}
                         onChange={e => setCell(r, col, e.target.value)}
-                        onBlur={e => (col === 'category' || col === 'subject') && setRows(rs => rs.map((x, i) => i === r ? normalizeCell(x, col, e.target.value) : x))}
+                        onBlur={e => (col === 'category' || col === 'subject' || col === 'est') && setRows(rs => rs.map((x, i) => i === r ? normalizeCell(x, col, e.target.value) : x))}
                         onKeyDown={e => onKeyDown(e, r, c)}
                         onPaste={e => onPaste(e, r, c)}
-                        placeholder={r === 0 ? ['民事法', '民法', '債總：給付不能', '3', '可選'][c] : ''}
+                        placeholder={r === 0 ? ['民事法', '民法', '債總：給付不能', '例: 1.5 或 45m', '可選'][c] : ''}
                       />
                     </td>
                   ))}
@@ -1429,12 +1462,12 @@ function WeekPage({ store }) {
           <div className="mt-2 pt-2 border-t border-line">
             {bufferForm ? (
               <form className="flex gap-1.5" onSubmit={e => {
-                e.preventDefault(); const h = parseFloat(bufferForm.h); if (!(h > 0)) return;
+                e.preventDefault(); const h = parseDurationInput(bufferForm.h); if (!(h > 0)) return;
                 store.addTasks([{ id: uid(), category: '緩衝', subject: '緩衝', title: bufferForm.title.trim() || '彈性緩衝時間', estHours: r2(h), status: 'in_month', assignedMonth: defaultMonth, isBuffer: true }]);
                 setBufferForm(null);
               }}>
                 <input className={`${INPUT} !text-xs`} value={bufferForm.title} onChange={e => setBufferForm(f => ({ ...f, title: e.target.value }))} autoFocus />
-                <input type="number" step="0.5" min="0.5" className={`${INPUT} !text-xs !w-14`} value={bufferForm.h} onChange={e => setBufferForm(f => ({ ...f, h: e.target.value }))} />
+                <DurationInput className={`${INPUT} !text-xs !w-24`} value={bufferForm.h} onChange={v => setBufferForm(f => ({ ...f, h: v }))} />
                 <button className={`${BTN} !px-2 !text-xs`}>＋</button>
               </form>
             ) : (
@@ -1489,9 +1522,9 @@ function CapacityModal({ store, onClose }) {
   const [daily, setDaily] = useState(String(s.dailyCapacityLimit)); const [weekly, setWeekly] = useState(String(s.weeklyCapacityLimit));
   return (
     <Modal title="⚙️ 容量設定" onClose={onClose}>
-      <form className="space-y-3" onSubmit={e => { e.preventDefault(); const d = parseFloat(daily), w = parseFloat(weekly); if (!(d > 0) || !(w > 0)) return; store.setSettings({ dailyCapacityLimit: r2(d), weeklyCapacityLimit: r2(w) }); onClose(); }}>
-        <div><label className={LABEL}>每日上限（hr）— 超過時欄位標籤轉為磚紅警示</label><input type="number" step="0.5" min="0.5" className={INPUT} value={daily} onChange={e => setDaily(e.target.value)} autoFocus /></div>
-        <div><label className={LABEL}>整週安全容量（hr）</label><input type="number" step="0.5" min="0.5" className={INPUT} value={weekly} onChange={e => setWeekly(e.target.value)} /></div>
+      <form className="space-y-3" onSubmit={e => { e.preventDefault(); const d = parseDurationInput(daily), w = parseDurationInput(weekly); if (!(d > 0) || !(w > 0)) return; store.setSettings({ dailyCapacityLimit: r2(d), weeklyCapacityLimit: r2(w) }); onClose(); }}>
+        <div><label className={LABEL}>每日上限（hr）— 超過時欄位標籤轉為磚紅警示</label><DurationInput value={daily} onChange={setDaily} autoFocus /></div>
+        <div><label className={LABEL}>整週安全容量（hr）</label><DurationInput value={weekly} onChange={setWeekly} /></div>
         <div className="flex justify-end gap-2"><button type="button" className={BTN} onClick={onClose}>取消</button><button className={BTN_PRIMARY}>儲存</button></div>
       </form>
     </Modal>
@@ -1506,13 +1539,13 @@ function QuickTaskModal({ store, onClose }) {
     <Modal title="＋ 插入今日臨時任務" onClose={onClose}>
       <form className="space-y-3" onSubmit={e => {
         e.preventDefault(); if (!title.trim() || !cs.category) return;
-        const T = todayStr(); const h = parseFloat(est);
-        store.addTasks([{ id: uid(), phaseId: (phaseOfMonth(store.data.settings.phases, T.slice(0, 7)) || currentPhase(store.data.settings.phases) || {}).id, ...cs, title: title.trim(), estHours: isNaN(h) ? 1 : r2(h), note: '', status: 'scheduled', assignedDate: T, assignedWeek: isoWeek(parseYmd(T)), assignedMonth: T.slice(0, 7), adhoc: !save }]);
+        const T = todayStr(); const h = parseDurationInput(est);
+        store.addTasks([{ id: uid(), phaseId: (phaseOfMonth(store.data.settings.phases, T.slice(0, 7)) || currentPhase(store.data.settings.phases) || {}).id, ...cs, title: title.trim(), estHours: h == null ? 1 : h, note: '', status: 'scheduled', assignedDate: T, assignedWeek: isoWeek(parseYmd(T)), assignedMonth: T.slice(0, 7), adhoc: !save }]);
         onClose();
       }}>
         <div><label className={LABEL}>科目</label><SubjectSelect subjects={subjects} category={cs.category} subject={cs.subject} onChange={(category, subject) => setCs({ category, subject })} /></div>
         <div><label className={LABEL}>任務名稱</label><input className={INPUT} value={title} onChange={e => setTitle(e.target.value)} autoFocus placeholder="例：補看老師加開的釋字解析" /></div>
-        <div><label className={LABEL}>預估工時（hr）</label><input type="number" step="0.25" min="0" className={INPUT} value={est} onChange={e => setEst(e.target.value)} /></div>
+        <div><label className={LABEL}>預估工時（hr）</label><DurationInput value={est} onChange={setEst} /></div>
         <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={save} onChange={e => setSave(e.target.checked)} />同步存入總資料庫（計入各科整體進度）</label>
         <div className="flex justify-end gap-2"><button type="button" className={BTN} onClick={onClose}>取消</button><button className={BTN_PRIMARY}>落入今天</button></div>
       </form>
