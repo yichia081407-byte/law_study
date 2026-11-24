@@ -1,0 +1,2115 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>司律讀書儀表板</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@300;400;500;700&display=swap" rel="stylesheet" />
+<script src="https://cdn.tailwindcss.com/3.4.16"></script>
+<script>
+  tailwind.config = {
+    theme: {
+      extend: {
+        colors: { paper: '#F9F8F6', ink: '#2D2B2A', sub: '#7C7772', line: '#E7E2DA', brick: '#8A4A45', brickbg: '#F7EFEF' },
+        fontFamily: { sans: ['"Noto Sans TC"', 'system-ui', 'sans-serif'] }
+      }
+    }
+  };
+</script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.3.1/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.26.4/babel.min.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+<style>
+  body { background: #F9F8F6; color: #2D2B2A; }
+  .thin-scroll::-webkit-scrollbar { width: 6px; height: 6px; }
+  .thin-scroll::-webkit-scrollbar-thumb { background: #E1DBD1; border-radius: 3px; }
+  input[type=number]::-webkit-inner-spin-button { opacity: .4; }
+  .memo-paper { background-image: repeating-linear-gradient(transparent, transparent 27px, #EFEAE2 27px, #EFEAE2 28px); line-height: 28px; }
+  @keyframes fadeinout { 0% { opacity: 0; transform: translateY(-4px) } 15%,75% { opacity: 1; transform: none } 100% { opacity: 0 } }
+  .saved-flash { animation: fadeinout 1.6s ease forwards; }
+</style>
+</head>
+<body class="font-sans antialiased">
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useMemo, useRef, useCallback } = React;
+
+/* ============================================================
+ *  ★ Firebase 設定：把 Firebase 主控台給你的設定碼貼在這裡 ★
+ * ============================================================ */
+const FIREBASE_CONFIG = {
+  apiKey: '貼上 apiKey',
+  authDomain: '貼上 authDomain',
+  projectId: '貼上 projectId',
+  storageBucket: '貼上 storageBucket',
+  messagingSenderId: '貼上 messagingSenderId',
+  appId: '貼上 appId',
+};
+// 管理者帳號：只有這個 Google 帳號登入時會出現「管理者」頁（實際權限由 Firestore 安全規則把關）
+const ADMIN_EMAIL = 'yichia081407@gmail.com';
+
+/* ====================== 常數與工具 ====================== */
+const STORAGE_KEY = 'LAW_STUDY_OS_DATA_V1';
+const BACKUP_KEY = 'LAW_STUDY_OS_BACKUP';
+
+const PALETTES = [
+  { bg: '#EBF1F5', fg: '#2C4A5E', bd: '#D4E0E8' }, // 民事法 灰藍
+  { bg: '#EEF3ED', fg: '#344E38', bd: '#D7E2D5' }, // 公法 鼠尾草綠
+  { bg: '#F7EFEF', fg: '#633333', bd: '#EAD5D5' }, // 刑事法 磚紅褐
+  { bg: '#F7F4EC', fg: '#5C4F2E', bd: '#EAE3CE' }, // 商事法 茶金灰
+  { bg: '#F3F0F4', fg: '#4A3E52', bd: '#E1D9E4' }, // 競爭法 灰紫
+];
+const NEUTRAL = { bg: '#F3F1ED', fg: '#6B6661', bd: '#E3DED6' };
+
+const DEFAULT_SUBJECTS = [
+  ['民事法', '民法'], ['民事法', '民事訴訟法'],
+  ['公法', '憲法'], ['公法', '行政法'],
+  ['刑事法', '刑法'], ['刑事法', '刑事訴訟法'],
+  ['商事法', '公司法'], ['商事法', '證券交易法'], ['商事法', '保險法'],
+  ['競爭法', '智慧財產權法'], ['競爭法', '公平交易法'],
+].map(([category, name]) => ({ id: uid(), category, name }));
+
+function uid() { return Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4); }
+const pad = n => String(n).padStart(2, '0');
+const ymd = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+const ymOf = d => ymd(d).slice(0, 7);
+const parseYmd = s => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d); };
+const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
+const mondayOf = d => { const x = new Date(d.getFullYear(), d.getMonth(), d.getDate()); return addDays(x, -((x.getDay() + 6) % 7)); };
+const isoWeek = d => {
+  const t = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+  const day = t.getUTCDay() || 7; t.setUTCDate(t.getUTCDate() + 4 - day);
+  const y = t.getUTCFullYear(); const w = Math.ceil(((t - Date.UTC(y, 0, 1)) / 864e5 + 1) / 7);
+  return `${y}-W${pad(w)}`;
+};
+const todayStr = () => ymd(new Date());
+const fmt1 = n => (Math.round((+n || 0) * 10) / 10).toFixed(1);
+// 過期判定：日期已過、拆分待重排、或排入「已結束週次」卻還沒完成的週待排任務
+const isOverdue = (t, T = todayStr()) => t.status !== 'completed' && (
+  (t.assignedDate && t.assignedDate < T) || (t.splitPending && !t.assignedDate) ||
+  (t.status === 'in_week' && !t.assignedDate && !!t.assignedWeek && t.assignedWeek < isoWeek(parseYmd(T))));
+// 列出某段月份範圍內的所有週次（週一～週日）；assignedMonth 取該週週四所在月份並限制在範圍內
+const weeksInRange = (startYM, endYM) => {
+  const out = []; if (!startYM || !endYM) return out;
+  const last = parseYmd(lastDayOf(endYM)); const md = d => `${d.getMonth() + 1}/${d.getDate()}`;
+  for (let d = mondayOf(parseYmd(`${startYM}-01`)); d <= last && out.length < 160; d = addDays(d, 7)) {
+    let month = ymOf(addDays(d, 3)); if (month < startYM) month = startYM; if (month > endYM) month = endYM;
+    out.push({ key: isoWeek(d), month, label: `${isoWeek(d)} (${md(d)} - ${md(addDays(d, 6))})` });
+  }
+  return out;
+};
+const r2 = n => Math.round((+n || 0) * 10) / 10; // 全系統工時一律四捨五入至小數點後一位
+// 單框智能分鐘換算：1.5 → 1.5 hr；45m / 45分 → 0.8 hr；1h30m / 1時30分 → 1.5 hr；無法辨識回傳 null
+function parseDurationInput(raw) {
+  if (raw == null) return null;
+  let s = String(raw).trim().toLowerCase().replace(/\s+/g, '')
+    .replace(/[０-９]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xFEE0)).replace(/[．。]/g, '.');
+  if (!s) return null;
+  if (/^(\d+\.?\d*|\.\d+)$/.test(s)) return r2(parseFloat(s));
+  const m = s.match(/^(?:(\d+\.?\d*|\.\d+)(?:hours?|hrs?|h|小時|時))?(?:(\d+\.?\d*|\.\d+)(?:minutes?|mins?|m|分鐘|分)?)?$/);
+  if (!m || (m[1] == null && m[2] == null)) return null;
+  return r2((parseFloat(m[1]) || 0) + (parseFloat(m[2]) || 0) / 60);
+}
+// 工時輸入框：可打 1.5 或 45m，失焦／Enter 時自動換算成小時
+function DurationInput({ value, onChange, onKeyDown, onBlur, className = INPUT, placeholder = '例: 1.5 或 45m', inputRef, ...rest }) {
+  const normalize = () => { const h = parseDurationInput(value); if (h != null && String(h) !== String(value)) onChange(String(h)); };
+  return (
+    <input ref={inputRef} type="text" autoComplete="off" className={className} placeholder={placeholder} value={value ?? ''}
+      onChange={e => onChange(e.target.value)}
+      onBlur={e => { normalize(); onBlur?.(e); }}
+      onKeyDown={e => { if (e.key === 'Enter') normalize(); onKeyDown?.(e); }} {...rest} />
+  );
+}
+// 表格內直接編輯的工時格：打字時暫存，失焦／Enter 才寫回資料
+function DurationCell({ value, onCommit, className }) {
+  const [draft, setDraft] = useState(String(value ?? ''));
+  const [focused, setFocused] = useState(false);
+  useEffect(() => { if (!focused) setDraft(String(value ?? '')); }, [value, focused]);
+  return (
+    <DurationInput className={className} value={draft} onChange={setDraft}
+      onFocus={() => setFocused(true)}
+      onBlur={() => { setFocused(false); const h = parseDurationInput(draft); if (h == null) setDraft(String(value ?? '')); else if (h !== value) onCommit(h); }}
+      onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur(); }} />
+  );
+}
+const sumEst = arr => r2(arr.reduce((s, t) => s + (+t.estHours || 0), 0));
+const pctOf = (a, b) => (b > 0 ? Math.min(100, (a / b) * 100) : 0);
+const WEEKDAYS = ['一', '二', '三', '四', '五', '六', '日'];
+const fmtMD = s => { const d = parseYmd(s); return `${d.getMonth() + 1}/${d.getDate()}`; };
+const categoriesOf = subjects => [...new Set(subjects.map(s => s.category))];
+const colorOf = (cat, subjects) => {
+  const i = categoriesOf(subjects).indexOf(cat);
+  return i < 0 ? NEUTRAL : PALETTES[i % PALETTES.length];
+};
+const countsInSubject = t => !t.isBuffer && !t.adhoc;
+
+/* ---------- 階段工程（Stage-Gate Phases）工具 ---------- */
+const addMonths = (ym, n) => { const [y, m] = ym.split('-').map(Number); return ymOf(new Date(y, m - 1 + n, 1)); };
+const lastDayOf = ym => { const [y, m] = ym.split('-').map(Number); return ymd(new Date(y, m, 0)); };
+const monthsBetween = (a, b) => { const out = []; if (!a || !b || a > b) return out; for (let s = a; s <= b && out.length < 120; s = addMonths(s, 1)) out.push(s); return out; };
+const phaseOfMonth = (phases, ym) => (ym ? phases.find(p => p.startMonth <= ym && ym <= p.endMonth) : undefined);
+const currentPhase = phases => { const M = ymOf(new Date()); return phaseOfMonth(phases, M) || phases.find(p => p.startMonth > M) || phases[phases.length - 1]; };
+const phaseShort = name => (name || '').split(/[：:]/)[0].trim();
+const fmtYM = ym => (ym ? `${ym.slice(0, 4)}/${+ym.slice(5)}` : '');
+function defaultPhases() {
+  const M = ymOf(new Date());
+  return [
+    { id: uid(), name: 'Phase 1：全科打底期', startMonth: M, endMonth: addMonths(M, 3) },
+    { id: uid(), name: 'Phase 2：考古題演練期', startMonth: addMonths(M, 4), endMonth: addMonths(M, 7) },
+    { id: uid(), name: 'Phase 3：衝刺總複習期', startMonth: addMonths(M, 8), endMonth: addMonths(M, 9) },
+  ];
+}
+
+/* ====================== 範例資料 ====================== */
+function defaultSettings() {
+  return {
+    targetExamName: '116 年司法官／律師 第一試',
+    targetExamDate: '2027-08-21',
+    dailyCapacityLimit: 7,
+    weeklyCapacityLimit: 42,
+    scratchpadMemo: '',
+    subjects: DEFAULT_SUBJECTS.map(s => ({ ...s, id: uid() })),
+    phases: defaultPhases(),
+  };
+}
+
+function seedData() {
+  const now = new Date();
+  const T = ymd(now), Y = ymd(addDays(now, -1)), TM = ymd(addDays(now, 1)), M = ymOf(now);
+  const sched = date => ({ status: 'scheduled', assignedMonth: date.slice(0, 7), assignedDate: date, assignedWeek: isoWeek(parseYmd(date)) });
+  const month = { status: 'in_month', assignedMonth: M };
+  const settings = defaultSettings(); const P1 = settings.phases[0].id;
+  const mk = (category, subject, title, estHours, extra = {}) => ({ id: uid(), phaseId: P1, category, subject, title, estHours, note: '', status: 'backlog', ...extra });
+  const tasks = [
+    mk('民事法', '民法', '總則：權利能力與行為能力', 3, sched(T)),
+    mk('民事法', '民法', '債總：契約之成立與效力', 4, month),
+    mk('民事法', '民法', '物權：所有權通則', 3),
+    mk('民事法', '民事訴訟法', '當事人適格與訴訟參加', 2.5, sched(T)),
+    mk('民事法', '民事訴訟法', '既判力之客觀範圍', 3, month),
+    mk('公法', '憲法', '基本權：言論自由審查基準', 2, { ...sched(T), status: 'completed', actualHours: 2.5, completedAt: now.toISOString() }),
+    mk('公法', '憲法', '權力分立與憲法法庭', 2.5, month),
+    mk('公法', '行政法', '行政處分之概念與附款', 3, sched(Y)),
+    mk('公法', '行政法', '行政訴訟類型', 3.5),
+    mk('刑事法', '刑法', '構成要件該當性與因果關係', 3, sched(TM)),
+    mk('刑事法', '刑法', '正犯與共犯', 3.5, month),
+    mk('刑事法', '刑事訴訟法', '強制處分：搜索扣押', 2.5, month),
+    mk('刑事法', '刑事訴訟法', '證據排除法則', 3),
+    mk('商事法', '公司法', '股東會與董事會', 3, month),
+    mk('商事法', '公司法', '董事之忠實義務', 2),
+    mk('商事法', '證券交易法', '內線交易', 2, month),
+    mk('商事法', '保險法', '保險利益與複保險', 2),
+    mk('競爭法', '智慧財產權法', '著作權合理使用', 2, month),
+    mk('競爭法', '公平交易法', '結合管制與聯合行為', 2.5),
+  ];
+  const drive = [
+    { id: uid(), title: '司律共筆總資料夾', url: 'https://drive.google.com/', children: [
+      { id: uid(), title: '民事法', url: 'https://drive.google.com/', children: [
+        { id: uid(), title: '民法講義', url: 'https://drive.google.com/', children: [] },
+        { id: uid(), title: '民訴考古題', url: 'https://drive.google.com/', children: [] },
+      ] },
+      { id: uid(), title: '公法', url: 'https://drive.google.com/', children: [] },
+      { id: uid(), title: '刑事法', url: 'https://drive.google.com/', children: [] },
+    ] },
+    { id: uid(), title: '歷屆試題 PDF', url: 'https://drive.google.com/', children: [] },
+  ];
+  return { tasks, drive, settings };
+}
+
+function normalize(d) {
+  const base = defaultSettings();
+  const s = d.settings || {};
+  const phases = Array.isArray(s.phases) ? s.phases : base.phases;
+  // 舊資料遷移：沒有 phaseId 的任務，依所屬月份（或今天）歸入對應階段
+  const fallback = (currentPhase(phases) || {}).id;
+  const tasks = (Array.isArray(d.tasks) ? d.tasks : []).map(t => t.phaseId ? t : {
+    ...t, phaseId: (phaseOfMonth(phases, t.assignedMonth || (t.assignedDate || '').slice(0, 7)) || {}).id || fallback,
+  }).map(t => (t.assignedDate && !t.assignedWeek ? { ...t, assignedWeek: isoWeek(parseYmd(t.assignedDate)) } : t));
+  return {
+    tasks,
+    drive: Array.isArray(d.drive) ? d.drive : [],
+    settings: { ...base, ...s, subjects: Array.isArray(s.subjects) ? s.subjects : base.subjects, phases },
+  };
+}
+function loadData() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) { const d = JSON.parse(raw); if (d && Array.isArray(d.tasks)) return normalize(d); }
+  } catch (e) { }
+  return seedData();
+}
+
+/* ====================== 資料 Store ====================== */
+function useStore(initial, cacheKey) {
+  const backupKey = `${cacheKey}_BACKUP`;
+  const [data, setData] = useState(() => initial || loadData());
+  const [savedTick, setSavedTick] = useState(0);
+  const prev = useRef(null);
+  useEffect(() => {
+    try {
+      if (prev.current) localStorage.setItem(backupKey, JSON.stringify({ savedAt: new Date().toISOString(), data: prev.current }));
+      localStorage.setItem(cacheKey, JSON.stringify(data));
+    } catch (e) { }
+    if (prev.current) setSavedTick(t => t + 1);
+    prev.current = data;
+  }, [data]);
+
+  const api = useMemo(() => {
+    const apply = (t, patch) => ({ ...t, ...(typeof patch === 'function' ? patch(t) : patch) });
+    return {
+      replaceAll: d => setData(normalize(d)),
+      setRaw: d => setData(d),
+      updateTask: (id, patch) => setData(d => ({ ...d, tasks: d.tasks.map(t => (t.id === id ? apply(t, patch) : t)) })),
+      updateTasks: (ids, patch) => { const s = new Set(ids); setData(d => ({ ...d, tasks: d.tasks.map(t => (s.has(t.id) ? apply(t, patch) : t)) })); },
+      addTasks: arr => setData(d => ({ ...d, tasks: [...d.tasks, ...arr] })),
+      deleteTasks: ids => { const s = new Set(ids); setData(d => ({ ...d, tasks: d.tasks.filter(t => !s.has(t.id)) })); },
+      setSettings: patch => setData(d => ({ ...d, settings: { ...d.settings, ...(typeof patch === 'function' ? patch(d.settings) : patch) } })),
+      setDrive: fn => setData(d => ({ ...d, drive: typeof fn === 'function' ? fn(d.drive) : fn })),
+      mutate: fn => setData(d => fn(d)),
+      completeTask: (id, actual) => setData(d => ({ ...d, tasks: d.tasks.map(t => t.id === id ? { ...t, status: 'completed', actualHours: r2(actual), completedAt: new Date().toISOString() } : t) })),
+      uncompleteTask: id => setData(d => ({ ...d, tasks: d.tasks.map(t => t.id === id ? { ...t, status: t.assignedDate ? 'scheduled' : t.assignedWeek ? 'in_week' : t.assignedMonth ? 'in_month' : 'backlog', actualHours: undefined, completedAt: undefined } : t) })),
+      splitTask: (id, pct, actual) => setData(d => {
+        const t = d.tasks.find(x => x.id === id); if (!t) return d;
+        const doneEst = r2(t.estHours * pct / 100);
+        const remEst = r2(t.estHours - doneEst);
+        const baseRem = t.remainingPercent ?? 100;
+        const newRem = Math.round(baseRem * (100 - pct) / 100);
+        const baseTitle = t.title.replace(/\s*\[剩餘 \d+%\]$/, '');
+        const rest = {
+          ...t, id: uid(), title: `${baseTitle} [剩餘 ${newRem}%]`, estHours: remEst,
+          actualHours: undefined, completedAt: undefined, splitDonePercent: undefined,
+          status: 'in_month', assignedMonth: t.assignedMonth || t.assignedDate?.slice(0, 7) || ymOf(new Date()),
+          assignedDate: undefined, assignedWeek: undefined,
+          parentTaskId: t.parentTaskId || t.id, remainingPercent: newRem, splitPending: true,
+        };
+        const done = { ...t, estHours: doneEst, originalEstHours: t.originalEstHours ?? t.estHours, splitDonePercent: pct, status: 'completed', actualHours: r2(actual), completedAt: new Date().toISOString() };
+        const tasks = [];
+        d.tasks.forEach(x => { if (x.id === id) { tasks.push(done, rest); } else tasks.push(x); });
+        return { ...d, tasks };
+      }),
+    };
+  }, []);
+  return { data, savedTick, backupKey, ...api };
+}
+
+/* ====================== 共用 UI ====================== */
+const BTN = 'inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-sm border border-line rounded-md bg-white hover:bg-[#F3F0EA] text-ink transition whitespace-nowrap disabled:opacity-40 disabled:cursor-not-allowed';
+const BTN_PRIMARY = 'inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-sm border border-ink rounded-md bg-ink hover:bg-[#45423F] text-white transition whitespace-nowrap disabled:opacity-40';
+const BTN_GHOST = 'inline-flex items-center justify-center w-7 h-7 rounded-md text-sub hover:text-ink hover:bg-[#F3F0EA] transition';
+const INPUT = 'w-full px-2.5 py-1.5 text-sm border border-line rounded-md bg-white outline-none focus:border-[#BDB3A6] focus:ring-2 focus:ring-[#EFEAE2]';
+const CARD = 'bg-white border border-line rounded-xl';
+const LABEL = 'block text-xs text-sub mb-1';
+
+function Modal({ title, onClose, children, width = 'max-w-md' }) {
+  useEffect(() => {
+    const h = e => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', h); return () => window.removeEventListener('keydown', h);
+  }, [onClose]);
+  return (
+    <div className="fixed inset-0 z-50 flex items-start sm:items-center justify-center bg-[#2D2B2A]/20 p-4 overflow-y-auto" onMouseDown={e => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className={`w-full ${width} bg-white border border-line rounded-xl shadow-[0_8px_30px_rgba(45,43,42,.08)] my-8`}>
+        <div className="flex items-center justify-between px-5 py-3 border-b border-line">
+          <h3 className="font-medium text-[15px]">{title}</h3>
+          <button onClick={onClose} className={BTN_GHOST} aria-label="關閉">✕</button>
+        </div>
+        <div className="p-5">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+function CatBadge({ task, subjects, small }) {
+  const c = task.isBuffer ? NEUTRAL : colorOf(task.category, subjects);
+  return (
+    <span className={`inline-flex items-center border rounded ${small ? 'px-1.5 text-[11px]' : 'px-2 py-0.5 text-xs'}`} style={{ background: c.bg, color: c.fg, borderColor: c.bd }}>
+      {task.isBuffer ? '緩衝' : task.subject}
+    </span>
+  );
+}
+
+function ProgressBar({ pct, color = '#2D2B2A', marker, height = 'h-2' }) {
+  return (
+    <div className={`relative w-full ${height} bg-[#F0ECE6] rounded-full`}>
+      <div className={`absolute left-0 top-0 ${height} rounded-full transition-all duration-500`} style={{ width: `${pct}%`, background: color }} />
+      {marker != null && (
+        <div className="absolute -top-1 -bottom-1 w-[2px] bg-[#B9A98F]" style={{ left: `calc(${marker}% - 1px)` }} title={`時間流逝 ${Math.round(marker)}%`} />
+      )}
+    </div>
+  );
+}
+
+function SubjectSelect({ subjects, category, subject, onChange, className = INPUT, allowEmpty }) {
+  const cats = categoriesOf(subjects);
+  const val = category && subject ? `${category}||${subject}` : '';
+  const known = subjects.some(s => s.category === category && s.name === subject);
+  return (
+    <select className={className} value={val} onChange={e => { const [c, s] = e.target.value.split('||'); onChange(c || '', s || ''); }}>
+      {(allowEmpty || !val) && <option value="">— 選擇科目 —</option>}
+      {val && !known && <option value={val}>{category} / {subject}（已移除）</option>}
+      {cats.map(c => (
+        <optgroup key={c} label={c}>
+          {subjects.filter(s => s.category === c).map(s => <option key={s.id} value={`${c}||${s.name}`}>{s.name}</option>)}
+        </optgroup>
+      ))}
+    </select>
+  );
+}
+
+function downloadFile(name, text) {
+  const blob = new Blob([text], { type: 'application/json' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name;
+  document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); return true; }
+  catch (e) {
+    const ta = document.createElement('textarea'); ta.value = text; document.body.appendChild(ta); ta.select();
+    const ok = document.execCommand('copy'); ta.remove(); return ok;
+  }
+}
+
+/* ====================== 完成 / 拆分 Modal ====================== */
+function CompleteModal({ task, store, onClose }) {
+  const [mode, setMode] = useState('full');
+  const [actual, setActual] = useState(String(task.estHours));
+  const [pct, setPct] = useState('50');
+  const ref = useRef();
+  useEffect(() => { ref.current?.select(); }, [mode]);
+  const p = Math.max(1, Math.min(99, parseFloat(pct) || 0));
+  const submit = e => {
+    e.preventDefault();
+    const a = parseDurationInput(actual); const act = a == null ? task.estHours : a;
+    if (mode === 'full') store.completeTask(task.id, act);
+    else store.splitTask(task.id, p, act);
+    onClose();
+  };
+  return (
+    <Modal title="完成任務" onClose={onClose}>
+      <form onSubmit={submit} className="space-y-4">
+        <div>
+          <div className="text-sm font-medium">{task.title}</div>
+          <div className="text-xs text-sub mt-0.5">預估工時 {task.estHours} hr（進度條只計算預估工時）</div>
+        </div>
+        <div className="grid grid-cols-2 gap-2 p-1 bg-paper border border-line rounded-lg text-sm">
+          <button type="button" onClick={() => setMode('full')} className={`py-1.5 rounded-md ${mode === 'full' ? 'bg-white border border-line shadow-sm' : 'text-sub'}`}>✓ 全部讀完</button>
+          <button type="button" onClick={() => setMode('split')} className={`py-1.5 rounded-md ${mode === 'split' ? 'bg-white border border-line shadow-sm' : 'text-sub'}`}>未讀完，拆分進度</button>
+        </div>
+        {mode === 'split' && (
+          <div>
+            <label className={LABEL}>已完成比例（%）</label>
+            <input type="number" min="1" max="99" className={INPUT} value={pct} onChange={e => setPct(e.target.value)} />
+            <div className="text-xs text-sub mt-1.5 leading-relaxed">
+              本卡認列 <b className="text-ink">{r2(task.estHours * p / 100)} hr</b> 並打勾；另生成「{task.title.replace(/\s*\[剩餘 \d+%\]$/, '')} [剩餘 {Math.round((task.remainingPercent ?? 100) * (100 - p) / 100)}%]」<b className="text-ink">{r2(task.estHours - r2(task.estHours * p / 100))} hr</b>，送入 ⚠️ 過期／未完成任務格。
+            </div>
+          </div>
+        )}
+        <div>
+          <label className={LABEL}>本次實際花費時間（hr，僅作記錄）</label>
+          <DurationInput inputRef={ref} autoFocus value={actual} onChange={setActual} />
+        </div>
+        <div className="flex justify-end gap-2 pt-1">
+          <button type="button" className={BTN} onClick={onClose}>取消</button>
+          <button type="submit" className={BTN_PRIMARY}>確認完成 ↵</button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+/* ====================== 首頁 Daily Focus ====================== */
+function HomePage({ store, goWeek }) {
+  const { tasks, settings, drive } = store.data;
+  const { subjects } = settings;
+  const [completing, setCompleting] = useState(null);
+  const [editExam, setEditExam] = useState(false);
+  const T = todayStr(); const now = new Date(); const M = ymOf(now);
+  const { phases } = settings;
+  const [phaseId, setPhaseId] = useState(() => (currentPhase(phases) || {}).id || '');
+  const phase = phases.find(p => p.id === phaseId) || currentPhase(phases);
+
+  const todays = tasks.filter(t => t.assignedDate === T).sort((a, b) => (a.status === 'completed') - (b.status === 'completed'));
+  const doneToday = todays.filter(t => t.status === 'completed');
+  const total = sumEst(todays), doneH = sumEst(doneToday);
+  const monthTasks = tasks.filter(t => t.assignedMonth === M);
+  const monthTotal = sumEst(monthTasks), monthDone = sumEst(monthTasks.filter(t => t.status === 'completed'));
+  const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+  const elapsed = (now.getDate() / daysInMonth) * 100;
+  const monthPct = pctOf(monthDone, monthTotal);
+  const overdueCount = tasks.filter(t => isOverdue(t, T)).length;
+  const curWeek = isoWeek(now);
+  const weekAll = tasks.filter(t => t.assignedWeek === curWeek);
+  const weekTotal = sumEst(weekAll), weekDone = sumEst(weekAll.filter(t => t.status === 'completed'));
+  const weekPct = pctOf(weekDone, weekTotal);
+  const weekDayNo = ((now.getDay() + 6) % 7) + 1; // 週一 = 1 … 週日 = 7
+  const weekElapsed = (weekDayNo / 7) * 100;
+  const dday = Math.ceil((parseYmd(settings.targetExamDate) - parseYmd(T)) / 864e5);
+
+  return (
+    <div className="grid gap-5 lg:grid-cols-[260px_minmax(0,1fr)_320px]">
+      {/* 頂部 */}
+      <div className="lg:col-span-3 grid gap-4 md:grid-cols-[minmax(0,280px)_1fr]">
+        <div className={`${CARD} p-5 relative`}>
+          <button className={`${BTN_GHOST} absolute top-3 right-3`} onClick={() => setEditExam(true)} title="編輯考試">✎</button>
+          <div className="text-xs text-sub pr-8">{settings.targetExamName}</div>
+          <div className="mt-1 flex items-baseline gap-1">
+            <span className="text-4xl font-light tracking-tight">{dday >= 0 ? `D-${dday}` : `D+${-dday}`}</span>
+          </div>
+          <div className="text-xs text-sub mt-1">目標日 {settings.targetExamDate.replace(/-/g, '/')}</div>
+        </div>
+        <div className={`${CARD} p-5 flex flex-col justify-center`}>
+          <div className="text-xs text-sub">{now.getFullYear()} 年 {now.getMonth() + 1} 月 {now.getDate()} 日（{WEEKDAYS[(now.getDay() + 6) % 7]}）</div>
+          <div className="mt-1.5 text-[15px] leading-relaxed">
+            今日排定 <b>{todays.length}</b> 個任務（共 <b>{total}</b> hr），已完成 <b>{doneH}</b> hr，剩餘 <b>{r2(total - doneH)}</b> hr。
+          </div>
+          <div className="mt-1 text-sm text-sub">
+            本週進度 <b className="text-ink font-medium">{fmt1(weekDone)}</b> / <b className="text-ink font-medium">{fmt1(weekTotal)}</b> hr
+            <span className="ml-1 text-xs">（{curWeek} · 第 {weekDayNo}/7 天）</span>
+          </div>
+          {overdueCount > 0 && (
+            <button onClick={goWeek} className="mt-2 self-start text-xs px-2 py-1 rounded border border-[#EAD5D5] bg-brickbg text-[#633333] hover:opacity-80">
+              ⚠️ 有 {overdueCount} 個過期／未完成任務待重新排程 →
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* 左：Drive */}
+      <div className="order-3 lg:order-none space-y-5">
+        <DrivePanel store={store} />
+        <SubjectProgress tasks={tasks} subjects={subjects} phase={phase} />
+      </div>
+
+      {/* 中：今日執行 */}
+      <div className={`${CARD} p-5 order-1 lg:order-none`}>
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="font-medium">今日執行清單</h2>
+          <span className="text-xs text-sub">{doneToday.length} / {todays.length} 完成</span>
+        </div>
+        {todays.length === 0 ? (
+          <div className="text-center py-12 text-sm text-sub">
+            今天還沒有排程。<br />
+            <button className={`${BTN} mt-3`} onClick={goWeek}>前往當週排程拖拉任務 →</button>
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {todays.map(t => {
+              const done = t.status === 'completed';
+              const c = t.isBuffer ? NEUTRAL : colorOf(t.category, subjects);
+              return (
+                <div key={t.id} className={`flex items-start gap-3 p-3 border border-line rounded-lg transition ${done ? 'bg-paper' : 'bg-white hover:border-[#D6CEC2]'}`} style={{ borderLeft: `3px solid ${c.fg}` }}>
+                  <button
+                    onClick={() => (done ? store.uncompleteTask(t.id) : setCompleting(t))}
+                    className={`mt-0.5 w-5 h-5 shrink-0 rounded border flex items-center justify-center text-xs ${done ? 'bg-ink border-ink text-white' : 'border-[#C9BFB2] hover:border-ink'}`}
+                    title={done ? '取消完成' : '完成任務'}>{done ? '✓' : ''}</button>
+                  <div className="flex-1 min-w-0">
+                    <div className={`text-sm ${done ? 'line-through text-sub' : ''}`}>{t.title}</div>
+                    <div className="flex flex-wrap items-center gap-1.5 mt-1 text-xs text-sub">
+                      <CatBadge task={t} subjects={subjects} small />
+                      <span>預估 {t.estHours} hr</span>
+                      {done && t.actualHours != null && <span>· 實際 {t.actualHours} hr</span>}
+                      {t.splitDonePercent && <span>· 已讀 {t.splitDonePercent}%</span>}
+                      {t.adhoc && <span>· 臨時</span>}
+                      {t.note && <span className="truncate">· {t.note}</span>}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* 右：進度 + 備忘錄 */}
+      <div className="space-y-5 order-2 lg:order-none">
+        <PhasePanel tasks={tasks} phases={phases} phase={phase} onSelect={setPhaseId} />
+        <div className={`${CARD} p-5 space-y-4`}>
+          <div>
+            <div className="flex justify-between text-sm mb-1.5"><span>今日進度</span><span className="text-sub">{Math.round(pctOf(doneH, total))}%</span></div>
+            <ProgressBar pct={pctOf(doneH, total)} />
+            <div className="text-[11px] text-sub mt-1">{doneH} / {total} hr</div>
+          </div>
+          <div>
+            <div className="flex justify-between text-sm mb-1.5"><span>本週進度</span><span className="text-sub">{Math.round(weekPct)}%</span></div>
+            <ProgressBar pct={weekPct} marker={weekElapsed} />
+            <div className="text-[11px] text-sub mt-1 flex justify-between gap-2">
+              <span>已完成 {fmt1(weekDone)} hr / 本週配額 {fmt1(weekTotal)} hr</span>
+              <span className={`whitespace-nowrap ${weekTotal > 0 && weekPct + 0.01 < weekElapsed ? 'text-brick' : ''}`}>{weekDayNo}/7 天{weekTotal > 0 && weekPct + 0.01 < weekElapsed ? '・落後' : ''}</span>
+            </div>
+          </div>
+          <div>
+            <div className="flex justify-between text-sm mb-1.5"><span>{now.getMonth() + 1} 月進度</span><span className="text-sub">{Math.round(monthPct)}%</span></div>
+            <ProgressBar pct={monthPct} marker={elapsed} />
+            <div className="text-[11px] text-sub mt-1 flex justify-between">
+              <span>{monthDone} / {monthTotal} hr</span>
+              <span className={monthPct + 0.01 < elapsed ? 'text-brick' : ''}>時間已過 {Math.round(elapsed)}%{monthPct + 0.01 < elapsed ? '・進度落後' : ''}</span>
+            </div>
+          </div>
+        </div>
+        <Scratchpad store={store} />
+      </div>
+
+      {completing && <CompleteModal task={completing} store={store} onClose={() => setCompleting(null)} />}
+      {editExam && <ExamModal store={store} onClose={() => setEditExam(false)} />}
+    </div>
+  );
+}
+
+function ExamModal({ store, onClose }) {
+  const s = store.data.settings;
+  const [name, setName] = useState(s.targetExamName); const [date, setDate] = useState(s.targetExamDate);
+  return (
+    <Modal title="編輯大考倒數" onClose={onClose}>
+      <form className="space-y-3" onSubmit={e => { e.preventDefault(); if (!date) return; store.setSettings({ targetExamName: name.trim() || '目標考試', targetExamDate: date }); onClose(); }}>
+        <div><label className={LABEL}>考試名稱</label><input className={INPUT} value={name} onChange={e => setName(e.target.value)} autoFocus /></div>
+        <div><label className={LABEL}>目標日期</label><input type="date" className={INPUT} value={date} onChange={e => setDate(e.target.value)} /></div>
+        <div className="flex justify-end gap-2"><button type="button" className={BTN} onClick={onClose}>取消</button><button className={BTN_PRIMARY}>儲存</button></div>
+      </form>
+    </Modal>
+  );
+}
+
+function PhasePanel({ tasks, phases, phase, onSelect }) {
+  if (!phase) return (
+    <div className={`${CARD} p-5 text-sm text-sub`}>尚未設定階段，請到「任務總庫 → ⚙️ 管理階段」建立。</div>
+  );
+  const T = todayStr();
+  const pt = tasks.filter(t => countsInSubject(t) && t.phaseId === phase.id);
+  const tot = sumEst(pt), dn = sumEst(pt.filter(t => t.status === 'completed'));
+  const remain = r2(tot - dn);
+  const deadline = lastDayOf(phase.endMonth);
+  const startDay = `${phase.startMonth}-01`;
+  const daysLeft = Math.floor((parseYmd(deadline) - parseYmd(T)) / 864e5) + 1; // 含今天
+  const notStarted = T < startDay;
+  const span = (parseYmd(deadline) - parseYmd(startDay)) / 864e5 + 1;
+  const elapsed = notStarted ? 0 : Math.min(100, ((parseYmd(T) - parseYmd(startDay)) / 864e5 + 1) / span * 100);
+  const pct = pctOf(dn, tot);
+  const perDay = daysLeft > 0 ? r2(remain / (notStarted ? span : daysLeft)) : null;
+  return (
+    <div className={`${CARD} p-5`}>
+      <select className={`${INPUT} !text-sm font-medium mb-4`} value={phase.id} onChange={e => onSelect(e.target.value)}>
+        {phases.map(p => <option key={p.id} value={p.id}>{p.name}（{fmtYM(p.startMonth)}–{fmtYM(p.endMonth)}）</option>)}
+      </select>
+      <div className="flex justify-between text-sm mb-1.5"><span>階段工程進度</span><span className="text-sub">{Math.round(pct)}%</span></div>
+      <ProgressBar pct={pct} marker={elapsed} />
+      <div className="text-[11px] text-sub mt-1 flex justify-between">
+        <span>{dn} / {tot} hr</span>
+        <span className={!notStarted && pct + 0.01 < elapsed ? 'text-brick' : ''}>時間已過 {Math.round(elapsed)}%</span>
+      </div>
+      <div className="grid grid-cols-2 gap-2 mt-4">
+        <div className="rounded-lg bg-paper border border-line px-3 py-2">
+          <div className="text-[11px] text-sub">階段死線 {deadline.slice(5).replace('-', '/')}</div>
+          <div className="text-lg font-light mt-0.5">{daysLeft > 0 ? (notStarted ? `尚未開始` : <>剩 {daysLeft} 天</>) : <span className="text-brick">已過死線</span>}</div>
+        </div>
+        <div className="rounded-lg bg-paper border border-line px-3 py-2">
+          <div className="text-[11px] text-sub">每日最低應推進</div>
+          <div className="text-lg font-light mt-0.5">{remain <= 0 ? '已完成 ✓' : perDay == null ? <span className="text-brick">{remain} hr 未完成</span> : <>{perDay} <span className="text-xs text-sub">hr/天</span></>}</div>
+        </div>
+      </div>
+      <div className="text-[11px] text-sub mt-2">未完成 {remain} hr{daysLeft > 0 && remain > 0 ? ` ÷ ${notStarted ? Math.round(span) : daysLeft} 天` : ''}</div>
+    </div>
+  );
+}
+
+function SubjectProgress({ tasks, subjects, phase }) {
+  const [open, setOpen] = useState({});
+  const cats = categoriesOf(subjects);
+  const valid = tasks.filter(t => countsInSubject(t) && (!phase || t.phaseId === phase.id));
+  return (
+    <div className={`${CARD} p-5`}>
+      <h3 className="text-sm font-medium mb-3">各科進度{phase && <span className="ml-1.5 text-xs font-normal text-sub">· {phaseShort(phase.name)}</span>}</h3>
+      <div className="space-y-3">
+        {cats.map(cat => {
+          const c = colorOf(cat, subjects);
+          const ct = valid.filter(t => t.category === cat);
+          const tot = sumEst(ct), dn = sumEst(ct.filter(t => t.status === 'completed'));
+          return (
+            <div key={cat}>
+              <button className="w-full text-left" onClick={() => setOpen(o => ({ ...o, [cat]: !o[cat] }))}>
+                <div className="flex justify-between items-center text-sm mb-1">
+                  <span className="flex items-center gap-1.5"><span className="text-[10px] text-sub w-2">{open[cat] ? '▾' : '▸'}</span><span style={{ color: c.fg }}>{cat}</span></span>
+                  <span className="text-xs text-sub">{Math.round(pctOf(dn, tot))}% · {dn}/{tot}h</span>
+                </div>
+                <ProgressBar pct={pctOf(dn, tot)} color={c.fg} height="h-1.5" />
+              </button>
+              {open[cat] && (
+                <div className="pl-4 mt-2 space-y-2">
+                  {subjects.filter(s => s.category === cat).map(s => {
+                    const st = ct.filter(t => t.subject === s.name);
+                    const a = sumEst(st.filter(t => t.status === 'completed')), b = sumEst(st);
+                    return (
+                      <div key={s.id}>
+                        <div className="flex justify-between text-xs mb-1"><span>{s.name}</span><span className="text-sub">{Math.round(pctOf(a, b))}% · {a}/{b}h</span></div>
+                        <ProgressBar pct={pctOf(a, b)} color={c.fg} height="h-1" />
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function Scratchpad({ store }) {
+  const saved = store.data.settings.scratchpadMemo || '';
+  const [text, setText] = useState(saved);
+  const [msg, setMsg] = useState('');
+  const timer = useRef(); const pending = useRef(false);
+  useEffect(() => { if (!pending.current) setText(saved); }, [saved]); // 匯入/還原時同步
+  const onChange = v => {
+    setText(v); clearTimeout(timer.current); pending.current = true;
+    timer.current = setTimeout(() => { pending.current = false; store.setSettings({ scratchpadMemo: v }); }, 500);
+  };
+  useEffect(() => () => clearTimeout(timer.current), []);
+  const flash = m => { setMsg(m); setTimeout(() => setMsg(''), 1400); };
+  return (
+    <div className={`${CARD} p-5`}>
+      <div className="flex items-center justify-between mb-2">
+        <h3 className="text-sm font-medium">隨手備忘錄</h3>
+        <div className="flex items-center gap-1">
+          {msg && <span className="text-[11px] text-sub mr-1">{msg}</span>}
+          <button className={BTN_GHOST} title="複製全文" onClick={async () => flash((await copyText(text)) ? '已複製' : '複製失敗')}>⧉</button>
+          <button className={BTN_GHOST} title="清空" onClick={() => { if (text && confirm('確定清空備忘錄？')) { setText(''); clearTimeout(timer.current); store.setSettings({ scratchpadMemo: '' }); } }}>🗑</button>
+        </div>
+      </div>
+      <textarea
+        className="memo-paper w-full min-h-[196px] text-sm bg-transparent outline-none resize-y placeholder:text-[#B8B1A8]"
+        placeholder="突然想到的爭點、要問老師的問題…（停止打字 0.5 秒自動儲存）"
+        value={text} onChange={e => onChange(e.target.value)} />
+    </div>
+  );
+}
+
+/* ====================== Google Drive 樹狀目錄 ====================== */
+const normUrl = u => { const s = (u || '').trim(); if (!s) return undefined; return /^[a-z]+:\/\//i.test(s) ? s : `https://${s}`; };
+function parseIndented(text) {
+  const lines = text.replace(/\r/g, '').split('\n').filter(l => l.trim());
+  const root = []; const stack = [{ level: -1, children: root }];
+  for (const line of lines) {
+    const lead = line.match(/^[\t ]*/)[0];
+    const level = (lead.match(/\t/g) || []).length + Math.floor(lead.replace(/\t/g, '').length / 2);
+    const content = line.trim().replace(/^[-*•]\s+/, '');
+    const [t, ...rest] = content.split('|');
+    const node = { id: uid(), title: t.trim() || '(未命名)', url: normUrl(rest.join('|')), children: [] };
+    while (stack.length > 1 && stack[stack.length - 1].level >= level) stack.pop();
+    stack[stack.length - 1].children.push(node);
+    stack.push({ level, children: node.children });
+  }
+  return root;
+}
+const mapTree = (nodes, fn) => nodes.map(n => fn({ ...n, children: mapTree(n.children || [], fn) }));
+const removeNode = (nodes, id) => nodes.filter(n => n.id !== id).map(n => ({ ...n, children: removeNode(n.children || [], id) }));
+const flatTree = (nodes, depth = 0, out = []) => { nodes.forEach(n => { out.push({ node: n, depth }); flatTree(n.children || [], depth + 1, out); }); return out; };
+const insertUnder = (nodes, parentId, node) => parentId ? mapTree(nodes, n => n.id === parentId ? { ...n, children: [...n.children, node] } : n) : [...nodes, node];
+
+function DrivePanel({ store }) {
+  const drive = store.data.drive;
+  const [collapsed, setCollapsed] = useState({});
+  const [importOpen, setImportOpen] = useState(false);
+  const [form, setForm] = useState(null); // {mode:'add'|'edit', node?, parentId?}
+  const Node = ({ n, depth }) => {
+    const hasKids = n.children && n.children.length > 0;
+    const isOpen = !collapsed[n.id];
+    return (
+      <div>
+        <div className="group flex items-center gap-1 rounded-md hover:bg-[#F6F3EE] pr-1" style={{ paddingLeft: depth * 14 }}>
+          <button className="w-5 h-6 text-[10px] text-sub shrink-0" onClick={() => hasKids && setCollapsed(c => ({ ...c, [n.id]: isOpen }))}>
+            {hasKids ? (isOpen ? '▾' : '▸') : ''}
+          </button>
+          <span className="text-xs shrink-0">{hasKids ? '📁' : n.url ? '🔗' : '📄'}</span>
+          {n.url ? (
+            <a href={n.url} target="_blank" rel="noopener noreferrer" className="flex-1 min-w-0 truncate text-sm py-1 hover:underline underline-offset-2" title={n.url}>{n.title}</a>
+          ) : (
+            <span className="flex-1 min-w-0 truncate text-sm py-1 cursor-default" onClick={() => hasKids && setCollapsed(c => ({ ...c, [n.id]: isOpen }))}>{n.title}</span>
+          )}
+          <span className="hidden group-hover:flex items-center">
+            <button className="w-6 h-6 text-xs text-sub hover:text-ink" title="在此新增子項目" onClick={() => setForm({ mode: 'add', parentId: n.id })}>＋</button>
+            <button className="w-6 h-6 text-xs text-sub hover:text-ink" title="編輯" onClick={() => setForm({ mode: 'edit', node: n })}>✎</button>
+            <button className="w-6 h-6 text-xs text-sub hover:text-brick" title="刪除" onClick={() => { if (confirm(`刪除「${n.title}」${hasKids ? '及其所有子項目' : ''}？`)) store.setDrive(d => removeNode(d, n.id)); }}>✕</button>
+          </span>
+        </div>
+        {hasKids && isOpen && n.children.map(k => <Node key={k.id} n={k} depth={depth + 1} />)}
+      </div>
+    );
+  };
+  return (
+    <div className={`${CARD} p-4`}>
+      <div className="flex items-center justify-between mb-2">
+        <h3 className="text-sm font-medium">Google Drive 快捷目錄</h3>
+      </div>
+      <div className="flex gap-1.5 mb-3">
+        <button className={`${BTN} !px-2 !text-xs flex-1`} onClick={() => setImportOpen(true)}>📝 縮排文字批次匯入</button>
+        <button className={`${BTN} !px-2 !text-xs`} onClick={() => setForm({ mode: 'add', parentId: '' })}>＋ 新增連結</button>
+      </div>
+      <div className="max-h-[520px] overflow-y-auto thin-scroll -mx-1 px-1">
+        {drive.length === 0 ? <div className="text-xs text-sub py-6 text-center">尚無連結</div> : drive.map(n => <Node key={n.id} n={n} depth={0} />)}
+      </div>
+      {importOpen && <DriveImportModal store={store} onClose={() => setImportOpen(false)} />}
+      {form && <DriveNodeModal store={store} form={form} onClose={() => setForm(null)} />}
+    </div>
+  );
+}
+
+function DriveImportModal({ store, onClose }) {
+  const [text, setText] = useState('');
+  const [replace, setReplace] = useState(false);
+  const preview = useMemo(() => flatTree(parseIndented(text)), [text]);
+  const onKeyDown = e => {
+    if (e.key === 'Tab') {
+      e.preventDefault(); const el = e.target; const s = el.selectionStart, en = el.selectionEnd;
+      const v = text.slice(0, s) + '\t' + text.slice(en); setText(v);
+      requestAnimationFrame(() => { el.selectionStart = el.selectionEnd = s + 1; });
+    }
+  };
+  return (
+    <Modal title="縮排文字批次匯入" onClose={onClose} width="max-w-2xl">
+      <div className="grid md:grid-cols-2 gap-4">
+        <div>
+          <label className={LABEL}>每行一個項目，格式「名稱 | URL」，以 Tab（或 2 空格）縮排表示階層</label>
+          <textarea className={`${INPUT} font-mono h-64 !text-xs`} value={text} onChange={e => setText(e.target.value)} onKeyDown={onKeyDown} autoFocus
+            placeholder={'民事法 | https://drive.google.com/...\n\t民法講義 | https://drive.google.com/...\n\t民訴考古題 | https://...\n公法 | https://...'} />
+        </div>
+        <div>
+          <div className={LABEL}>預覽（{preview.length} 項）</div>
+          <div className="h-64 overflow-auto thin-scroll border border-line rounded-md p-2 text-sm">
+            {preview.map(({ node, depth }) => (
+              <div key={node.id} className="truncate" style={{ paddingLeft: depth * 14 }}>{node.url ? '🔗' : '📁'} {node.title}</div>
+            ))}
+          </div>
+        </div>
+      </div>
+      <div className="flex items-center justify-between mt-4">
+        <label className="text-sm flex items-center gap-2"><input type="checkbox" checked={replace} onChange={e => setReplace(e.target.checked)} />取代現有目錄（預設為附加）</label>
+        <div className="flex gap-2">
+          <button className={BTN} onClick={onClose}>取消</button>
+          <button className={BTN_PRIMARY} disabled={!preview.length} onClick={() => {
+            const nodes = parseIndented(text);
+            if (replace && !confirm('確定以匯入內容取代整個目錄？')) return;
+            store.setDrive(d => (replace ? nodes : [...d, ...nodes])); onClose();
+          }}>匯入</button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+function DriveNodeModal({ store, form, onClose }) {
+  const editing = form.mode === 'edit';
+  const [title, setTitle] = useState(editing ? form.node.title : '');
+  const [url, setUrl] = useState(editing ? form.node.url || '' : '');
+  const [parentId, setParentId] = useState(form.parentId || '');
+  const folders = flatTree(store.data.drive);
+  return (
+    <Modal title={editing ? '編輯項目' : '新增資料夾／連結'} onClose={onClose}>
+      <form className="space-y-3" onSubmit={e => {
+        e.preventDefault(); if (!title.trim()) return;
+        if (editing) store.setDrive(d => mapTree(d, n => n.id === form.node.id ? { ...n, title: title.trim(), url: normUrl(url) } : n));
+        else store.setDrive(d => insertUnder(d, parentId, { id: uid(), title: title.trim(), url: normUrl(url), children: [] }));
+        onClose();
+      }}>
+        <div><label className={LABEL}>名稱</label><input className={INPUT} value={title} onChange={e => setTitle(e.target.value)} autoFocus /></div>
+        <div><label className={LABEL}>URL（可留空作為純資料夾）</label><input className={INPUT} value={url} onChange={e => setUrl(e.target.value)} placeholder="https://drive.google.com/..." /></div>
+        {!editing && (
+          <div><label className={LABEL}>放在</label>
+            <select className={INPUT} value={parentId} onChange={e => setParentId(e.target.value)}>
+              <option value="">（最上層）</option>
+              {folders.map(({ node, depth }) => <option key={node.id} value={node.id}>{'　'.repeat(depth)}{node.title}</option>)}
+            </select>
+          </div>
+        )}
+        <div className="flex justify-end gap-2"><button type="button" className={BTN} onClick={onClose}>取消</button><button className={BTN_PRIMARY}>儲存</button></div>
+      </form>
+    </Modal>
+  );
+}
+
+/* ====================== 任務總庫 Database ====================== */
+function statusLabel(t) {
+  if (t.status === 'completed') return { text: '✓ 已完成', cls: 'text-[#344E38]' };
+  if (t.assignedDate) return { text: `排定 ${fmtMD(t.assignedDate)}`, cls: 'text-ink' };
+  if (t.splitPending) return { text: '⚠️ 待重排', cls: 'text-brick' };
+  if (t.status === 'in_week' && t.assignedWeek) return { text: `🗓️ ${t.assignedWeek.slice(5)} 週待排`, cls: 'text-ink' };
+  if (t.assignedMonth) return { text: `${+t.assignedMonth.slice(5)} 月份池`, cls: 'text-sub' };
+  return { text: '未指派', cls: 'text-[#B0A89E]' };
+}
+
+function DatabasePage({ store }) {
+  const { tasks, settings } = store.data; const { subjects, phases } = settings;
+  const cats = categoriesOf(subjects);
+  const [tab, setTab] = useState('全部');
+  const [q, setQ] = useState('');
+  const [statusF, setStatusF] = useState('all');
+  const [sel, setSel] = useState(new Set());
+  const [grid, setGrid] = useState(false);
+  const [mgr, setMgr] = useState(false);
+  const [phaseMgr, setPhaseMgr] = useState(false);
+  const [phaseTab, setPhaseTab] = useState(() => (currentPhase(phases) || {}).id || '__none__');
+  const [movePhase, setMovePhase] = useState('');
+  const [splitting, setSplitting] = useState(null);
+  const [weekMenu, setWeekMenu] = useState(false);
+
+  const phaseIds = new Set(phases.map(p => p.id));
+  const orphanCount = tasks.filter(t => countsInSubject(t) && !phaseIds.has(t.phaseId)).length;
+  const activePhase = phases.find(p => p.id === phaseTab);
+  // 目前的頁籤若被刪除，自動切回現行階段
+  useEffect(() => {
+    if (phaseTab === '__none__' ? (orphanCount === 0 && phases.length > 0) : !activePhase) setPhaseTab((currentPhase(phases) || {}).id || '__none__');
+  }, [phaseTab, activePhase, orphanCount, phases]);
+  useEffect(() => { setSel(new Set()); }, [phaseTab]);
+
+  const monthOptions = activePhase ? monthsBetween(activePhase.startMonth, activePhase.endMonth) : [];
+  const defaultMonth = monthOptions.includes(ymOf(new Date())) ? ymOf(new Date()) : monthOptions[0] || ymOf(new Date());
+  const [month, setMonth] = useState(defaultMonth);
+  useEffect(() => { setMonth(defaultMonth); }, [phaseTab, activePhase?.startMonth, activePhase?.endMonth]);
+  const weekOptions = useMemo(() => (activePhase ? weeksInRange(activePhase.startMonth, activePhase.endMonth) : []), [activePhase?.startMonth, activePhase?.endMonth]);
+  const thisWeek = isoWeek(new Date());
+  useEffect(() => { if (sel.size === 0) setWeekMenu(false); }, [sel]);
+
+  const order = useMemo(() => { const m = {}; subjects.forEach((s, i) => { m[`${s.category}||${s.name}`] = i; }); return m; }, [subjects]);
+  const all = tasks.filter(countsInSubject).filter(t => (phaseTab === '__none__' ? !phaseIds.has(t.phaseId) : t.phaseId === phaseTab));
+  const rows = all
+    .filter(t => tab === '全部' || t.category === tab)
+    .filter(t => !q || `${t.title} ${t.subject} ${t.note || ''}`.toLowerCase().includes(q.toLowerCase()))
+    .filter(t => statusF === 'all' || (statusF === 'backlog' ? (!t.assignedMonth && t.status !== 'completed') : statusF === 'week' ? (t.status === 'in_week' && !t.assignedDate) : statusF === 'month' ? (t.assignedMonth && !t.assignedDate && t.status !== 'completed' && t.status !== 'in_week') : statusF === 'scheduled' ? (t.assignedDate && t.status !== 'completed') : t.status === 'completed'))
+    .map((t, i) => ({ t, i }))
+    .sort((a, b) => ((order[`${a.t.category}||${a.t.subject}`] ?? 999) - (order[`${b.t.category}||${b.t.subject}`] ?? 999)) || a.i - b.i)
+    .map(x => x.t);
+  const allSel = rows.length > 0 && rows.every(t => sel.has(t.id));
+  const toggle = id => setSel(s => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  const selIds = [...sel].filter(id => tasks.some(t => t.id === id));
+
+  const assignMonth = () => {
+    store.updateTasks(selIds, t => t.status === 'completed' ? { assignedMonth: month } : { assignedMonth: month, status: 'in_month', assignedDate: undefined, assignedWeek: undefined, splitPending: false });
+    setSel(new Set());
+  };
+  // 直接指派至週次：寫入 assignedWeek + 對應月份，狀態 in_week，直接進入該週待排清單
+  const assignWeek = w => {
+    store.updateTasks(selIds, t => t.status === 'completed' ? { assignedWeek: w.key, assignedMonth: w.month } : { assignedWeek: w.key, assignedMonth: w.month, status: 'in_week', assignedDate: undefined, splitPending: false });
+    setWeekMenu(false); setSel(new Set());
+  };
+
+  return (
+    <div className="pb-24">
+      {/* 階段切換列 */}
+      <div className="flex items-stretch gap-2 mb-4">
+        <div className="flex-1 flex gap-2 overflow-x-auto thin-scroll pb-1">
+          {phases.map(p => {
+            const pt = tasks.filter(t => countsInSubject(t) && t.phaseId === p.id);
+            const tot = sumEst(pt), dn = sumEst(pt.filter(t => t.status === 'completed'));
+            const active = phaseTab === p.id; const isNow = currentPhase(phases)?.id === p.id && phaseOfMonth(phases, ymOf(new Date()));
+            return (
+              <button key={p.id} onClick={() => setPhaseTab(p.id)}
+                className={`text-left min-w-[190px] px-3.5 py-2.5 rounded-lg border transition ${active ? 'bg-ink border-ink text-white' : 'bg-white border-line hover:border-[#D6CEC2]'}`}>
+                <div className="text-sm font-medium truncate">{p.name}{isNow && <span className={`ml-1.5 text-[10px] px-1 rounded ${active ? 'bg-white/20' : 'bg-[#F3F0EA] text-sub'}`}>進行中</span>}</div>
+                <div className={`text-[11px] mt-0.5 ${active ? 'text-white/70' : 'text-sub'}`}>{fmtYM(p.startMonth)} – {fmtYM(p.endMonth)} · {pt.length} 筆 · {Math.round(pctOf(dn, tot))}%</div>
+              </button>
+            );
+          })}
+          {orphanCount > 0 && (
+            <button onClick={() => setPhaseTab('__none__')} className={`text-left min-w-[150px] px-3.5 py-2.5 rounded-lg border border-dashed transition ${phaseTab === '__none__' ? 'bg-ink border-ink text-white' : 'bg-white border-[#EAD5D5] text-brick'}`}>
+              <div className="text-sm font-medium">未分階段</div>
+              <div className="text-[11px] mt-0.5 opacity-70">{orphanCount} 筆待歸入階段</div>
+            </button>
+          )}
+        </div>
+        <button className={`${BTN} self-start`} onClick={() => setPhaseMgr(true)}>⚙️ 管理階段</button>
+      </div>
+
+      {phases.length === 0 && orphanCount === 0 ? (
+        <div className={`${CARD} p-10 text-center text-sm text-sub`}>還沒有任何階段。<br /><button className={`${BTN_PRIMARY} mt-3`} onClick={() => setPhaseMgr(true)}>＋ 建立第一個階段</button></div>
+      ) : (<>
+      <div className="flex flex-wrap items-center gap-2 mb-4">
+        <h2 className="text-lg font-medium mr-2">{activePhase ? activePhase.name : '未分階段任務'}</h2>
+        {activePhase && <button className={grid ? BTN_PRIMARY : BTN} onClick={() => setGrid(g => !g)}>📊 {grid ? '收合批次表格' : '開啟批次表格編輯'}</button>}
+        <button className={BTN} onClick={() => setMgr(true)}>⚙️ 管理科目</button>
+        <div className="flex-1" />
+        <input className={`${INPUT} !w-48`} placeholder="搜尋章節／備註…" value={q} onChange={e => setQ(e.target.value)} />
+        <select className={`${INPUT} !w-32`} value={statusF} onChange={e => setStatusF(e.target.value)}>
+          <option value="all">全部狀態</option><option value="backlog">未指派</option><option value="week">週待排</option><option value="month">月份池</option><option value="scheduled">已排程</option><option value="completed">已完成</option>
+        </select>
+      </div>
+
+      {grid && activePhase && <GridEditor key={activePhase.id} store={store} phase={activePhase} onClose={() => setGrid(false)} />}
+
+      <div className="flex gap-1 overflow-x-auto thin-scroll mb-3 border-b border-line">
+        {['全部', ...cats].map(c => {
+          const col = c === '全部' ? null : colorOf(c, subjects);
+          const active = tab === c;
+          return (
+            <button key={c} onClick={() => setTab(c)} className={`px-3 py-2 text-sm whitespace-nowrap -mb-px border-b-2 transition ${active ? 'border-ink' : 'border-transparent text-sub hover:text-ink'}`} style={active && col ? { color: col.fg, borderColor: col.fg } : {}}>
+              {c}<span className="ml-1 text-[11px] text-sub">{all.filter(t => c === '全部' || t.category === c).length}</span>
+            </button>
+          );
+        })}
+      </div>
+
+      <div className="text-xs text-sub mb-2">顯示 {rows.length} 筆 · 預估共 {sumEst(rows)} hr · 已完成 {sumEst(rows.filter(t => t.status === 'completed'))} hr</div>
+
+      <div className={`${CARD} overflow-x-auto thin-scroll`}>
+        <table className="w-full text-sm min-w-[860px]">
+          <thead>
+            <tr className="text-left text-xs text-sub border-b border-line bg-[#FCFBF9]">
+              <th className="p-2.5 w-9"><input type="checkbox" checked={allSel} onChange={() => setSel(allSel ? new Set() : new Set(rows.map(t => t.id)))} /></th>
+              <th className="p-2.5 w-40 font-normal">科目</th>
+              <th className="p-2.5 font-normal">章節名稱</th>
+              <th className="p-2.5 w-24 font-normal">預估 hr</th>
+              <th className="p-2.5 w-20 font-normal">實際 hr</th>
+              <th className="p-2.5 w-52 font-normal">備註</th>
+              <th className="p-2.5 w-24 font-normal">狀態</th>
+              <th className="p-2.5 w-20"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length === 0 && <tr><td colSpan="8" className="text-center text-sub py-10">沒有符合的任務。點「📊 開啟批次表格編輯」開始建立章節。</td></tr>}
+            {rows.map(t => {
+              const st = statusLabel(t); const c = colorOf(t.category, subjects);
+              const cell = 'w-full bg-transparent px-1.5 py-1 rounded outline-none hover:bg-[#F6F3EE] focus:bg-white focus:ring-1 focus:ring-[#D6CEC2]';
+              return (
+                <tr key={t.id} className={`border-b border-line last:border-0 ${sel.has(t.id) ? 'bg-[#FBF9F5]' : ''}`}>
+                  <td className="p-2.5"><input type="checkbox" checked={sel.has(t.id)} onChange={() => toggle(t.id)} /></td>
+                  <td className="p-1.5">
+                    <div className="flex items-center gap-1.5">
+                      <span className="w-1.5 h-5 rounded-full shrink-0" style={{ background: c.fg }} />
+                      <SubjectSelect subjects={subjects} category={t.category} subject={t.subject} className={`${cell} !px-1`} onChange={(category, subject) => category && store.updateTask(t.id, { category, subject })} />
+                    </div>
+                  </td>
+                  <td className="p-1.5"><input className={`${cell} ${t.status === 'completed' ? 'text-sub' : ''}`} value={t.title} onChange={e => store.updateTask(t.id, { title: e.target.value })} /></td>
+                  <td className="p-1.5"><DurationCell className={cell} value={t.estHours} onCommit={h => store.updateTask(t.id, { estHours: h })} /></td>
+                  <td className="p-2.5 text-sub">{t.actualHours ?? '—'}</td>
+                  <td className="p-1.5"><input className={cell} value={t.note || ''} placeholder="—" onChange={e => store.updateTask(t.id, { note: e.target.value })} /></td>
+                  <td className={`p-2.5 text-xs whitespace-nowrap ${st.cls}`}>{st.text}</td>
+                  <td className="p-1.5 whitespace-nowrap">
+                    {t.status !== 'completed' && <button className={BTN_GHOST} title="自訂段落切分" onClick={() => setSplitting(t)}>✂️</button>}
+                    <button className={BTN_GHOST} title="刪除" onClick={() => { if (confirm(`刪除「${t.title}」？`)) store.deleteTasks([t.id]); }}>🗑</button>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      {selIds.length > 0 && (
+        <div className="fixed bottom-5 left-1/2 -translate-x-1/2 z-40 w-[calc(100%-32px)] max-w-3xl bg-white border border-line rounded-xl shadow-[0_8px_30px_rgba(45,43,42,.12)] px-4 py-3 flex flex-wrap items-center gap-2">
+          <span className="text-sm mr-1">已選 <b>{selIds.length}</b> 筆 · {sumEst(tasks.filter(t => sel.has(t.id)))} hr</span>
+          <div className="flex-1" />
+          {activePhase ? (
+            <select className={`${INPUT} !w-32`} value={month} onChange={e => setMonth(e.target.value)} title={`限 ${activePhase.name} 期間`}>
+              {monthOptions.map(m => <option key={m} value={m}>{fmtYM(m)}</option>)}
+            </select>
+          ) : <span className="text-xs text-sub">先移入階段才能指派月份</span>}
+          {activePhase && <button className={BTN_PRIMARY} disabled={!month} onClick={assignMonth}>📅 指派至月份池</button>}
+          {activePhase && (
+            <div className="relative">
+              <button className={weekMenu ? BTN_PRIMARY : BTN} onClick={() => setWeekMenu(o => !o)}>🗓️ 直接指派至週次 {weekMenu ? '▴' : '▾'}</button>
+              {weekMenu && (
+                <div className="absolute bottom-full mb-2 left-0 sm:left-auto sm:right-0 w-64 max-h-72 overflow-y-auto thin-scroll bg-white border border-line rounded-lg shadow-[0_8px_30px_rgba(45,43,42,.14)] py-1 z-50">
+                  <div className="px-3 py-1.5 text-[11px] text-sub border-b border-line sticky top-0 bg-white">{activePhase.name} 期間 · 點選即指派</div>
+                  {weekOptions.map(w => (
+                    <button key={w.key} ref={w.key === thisWeek ? el => { if (el && el.parentElement) el.parentElement.scrollTop = el.offsetTop - 40; } : undefined}
+                      className={`w-full text-left px-3 py-1.5 text-sm hover:bg-[#F6F3EE] ${w.key === thisWeek ? 'font-medium' : w.key < thisWeek ? 'text-sub' : ''}`}
+                      onClick={() => assignWeek(w)}>
+                      {w.label}{w.key === thisWeek && <span className="ml-1.5 text-[10px] px-1 rounded bg-[#F3F0EA] text-sub">本週</span>}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+          <select className={`${INPUT} !w-36`} value={movePhase} onChange={e => {
+            const pid = e.target.value; if (!pid) return;
+            const p = phases.find(x => x.id === pid);
+            store.updateTasks(selIds, t => ({ phaseId: pid, ...(t.assignedMonth && t.status !== 'completed' && !t.assignedDate && !(p.startMonth <= t.assignedMonth && t.assignedMonth <= p.endMonth) ? { assignedMonth: undefined, status: 'backlog' } : {}) }));
+            setSel(new Set()); setMovePhase('');
+          }}>
+            <option value="">↪ 移至階段…</option>
+            {phases.filter(p => p.id !== phaseTab).map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+          </select>
+          <button className={BTN} onClick={() => { store.updateTasks(selIds, t => t.status === 'completed' ? {} : { assignedMonth: undefined, assignedDate: undefined, assignedWeek: undefined, status: 'backlog', splitPending: false }); setSel(new Set()); }}>↩ 移回未指派</button>
+          <button className={`${BTN} !text-brick`} onClick={() => { if (confirm(`確定刪除 ${selIds.length} 筆任務？此動作無法復原（可從設定的快照還原上一步）。`)) { store.deleteTasks(selIds); setSel(new Set()); } }}>🗑️ 批次刪除</button>
+          <button className={BTN_GHOST} title="取消選取" onClick={() => setSel(new Set())}>✕</button>
+        </div>
+      )}
+
+      </>)}
+
+      {mgr && <SubjectManager store={store} onClose={() => setMgr(false)} />}
+      {phaseMgr && <PhaseManager store={store} onClose={() => setPhaseMgr(false)} />}
+      {splitting && <SplitModal store={store} task={splitting} onClose={() => { setSplitting(null); setSel(new Set()); }} />}
+    </div>
+  );
+}
+
+/* ---------- 自訂段落切分 ---------- */
+function SplitModal({ store, task, onClose }) {
+  const base = task.title.replace(/\s*\[剩餘 \d+%\]$/, '');
+  const blank = () => ({ key: uid(), title: `${base} - `, est: '' });
+  const [parts, setParts] = useState(() => [blank(), blank()]);
+  const [allowChange, setAllowChange] = useState(false);
+  const firstRef = useRef(null);
+  useEffect(() => { firstRef.current?.focus(); }, []);
+
+  const est = r2(task.estHours);
+  const sum = r2(parts.reduce((s, p) => s + (parseDurationInput(p.est) || 0), 0));
+  const remain = est - sum;
+  const matched = Math.abs(remain) < 0.005;
+  const rowsOk = parts.every(p => p.title.trim() && parseDurationInput(p.est) > 0);
+  const canSubmit = parts.length >= 2 && rowsOk && (matched || allowChange);
+
+  const set = (key, patch) => setParts(ps => ps.map(p => (p.key === key ? { ...p, ...patch } : p)));
+  const submit = () => {
+    if (!canSubmit) return;
+    const month = task.assignedMonth || task.assignedDate?.slice(0, 7);
+    const news = parts.map(p => ({
+      id: uid(), phaseId: task.phaseId, category: task.category, subject: task.subject, note: task.note || '',
+      title: p.title.trim(), estHours: parseDurationInput(p.est),
+      status: task.assignedWeek ? 'in_week' : month ? 'in_month' : 'backlog', ...(month ? { assignedMonth: month } : {}), ...(task.assignedWeek ? { assignedWeek: task.assignedWeek } : {}),
+    }));
+    store.mutate(d => ({ ...d, tasks: d.tasks.flatMap(x => (x.id === task.id ? news : [x])) }));
+    onClose();
+  };
+
+  const stat = 'flex-1 rounded-lg border border-line px-3 py-2';
+  return (
+    <Modal title="✂️ 自訂段落拆解" onClose={onClose} width="max-w-2xl">
+      <div className="text-xs text-sub mb-3 truncate">原任務：<span className="text-ink">{task.subject}</span> · {task.title}</div>
+      <div className="flex flex-wrap gap-2 mb-4 text-sm">
+        <div className={stat}><div className="text-[11px] text-sub">原預估工時</div><div className="font-medium">{est} hr</div></div>
+        <div className={stat}><div className="text-[11px] text-sub">目前已分配</div><div className="font-medium">{sum} hr</div></div>
+        <div className={`${stat} ${matched ? 'bg-[#F0F5EE] border-[#CFE0C8]' : 'bg-[#FBF1EC] border-[#EBCDBF]'}`}>
+          <div className="text-[11px] text-sub">剩餘未分配</div>
+          <div className={`font-medium ${matched ? 'text-[#4F7A45]' : 'text-[#B5573A]'}`}>{matched ? '✓ 配額相符' : `${remain.toFixed(2)} hr`}</div>
+        </div>
+      </div>
+
+      <div className="space-y-2">
+        <div className="flex gap-2 text-[11px] text-sub px-1"><span className="flex-1">子段落名稱</span><span className="w-32">預估工時</span><span className="w-8" /></div>
+        {parts.map((p, i) => (
+          <div key={p.key} className="flex gap-2 items-center">
+            <input ref={i === 0 ? firstRef : null} className={`${INPUT} flex-1`} value={p.title} onChange={e => set(p.key, { title: e.target.value })} placeholder="例：第一編 總則" />
+            <DurationInput className={`${INPUT} !w-32`} value={p.est}
+              onChange={v => set(p.key, { est: v })}
+              onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); canSubmit ? submit() : setParts(ps => [...ps, blank()]); } }} />
+            <button className={`${BTN_GHOST} w-8 ${parts.length > 2 ? 'hover:!text-brick' : 'opacity-25 cursor-not-allowed'}`} title="刪除此段" disabled={parts.length <= 2}
+              onClick={() => setParts(ps => ps.filter(x => x.key !== p.key))}>✕</button>
+          </div>
+        ))}
+      </div>
+      <button className={`${BTN} mt-2 w-full border-dashed`} onClick={() => setParts(ps => [...ps, blank()])}>＋ 新增段落</button>
+
+      <div className="mt-4 pt-4 border-t border-line flex flex-wrap items-center gap-3">
+        <label className="flex items-center gap-1.5 text-xs text-sub cursor-pointer select-none">
+          <input type="checkbox" checked={allowChange} onChange={e => setAllowChange(e.target.checked)} />
+          允許變更總預估工時{allowChange && !matched && sum > 0 && <span className="text-[#B5573A]">（{est} → {sum} hr）</span>}
+        </label>
+        <div className="flex-1" />
+        <button className={BTN} onClick={onClose}>取消</button>
+        <button className={BTN_PRIMARY} disabled={!canSubmit} onClick={submit}
+          title={!rowsOk ? '每一段都需要名稱與大於 0 的工時' : !matched && !allowChange ? '已分配總工時需等於原預估工時' : ''}>✓ 確認拆解</button>
+      </div>
+      <div className="text-[11px] text-sub mt-2">確認後原任務會被刪除，各段落於原位置生成，並沿用原任務的階段、科目、備註與週次／月份池。</div>
+    </Modal>
+  );
+}
+
+/* ---------- 階段管理 ---------- */
+function PhaseManager({ store, onClose }) {
+  const { phases } = store.data.settings; const tasks = store.data.tasks;
+  const last = phases[phases.length - 1];
+  const [name, setName] = useState('');
+  const [start, setStart] = useState(last ? addMonths(last.endMonth, 1) : ymOf(new Date()));
+  const [end, setEnd] = useState(last ? addMonths(last.endMonth, 3) : addMonths(ymOf(new Date()), 2));
+  const update = (id, patch) => store.setSettings(s => ({ phases: s.phases.map(p => (p.id === id ? { ...p, ...patch } : p)) }));
+  const setRange = (p, key, v) => {
+    if (!v) return;
+    const next = { ...p, [key]: v };
+    if (next.startMonth > next.endMonth) { alert('起始月份不能晚於結束月份'); return; }
+    update(p.id, { [key]: v });
+  };
+  const del = p => {
+    const n = tasks.filter(t => t.phaseId === p.id).length;
+    if (!confirm(`刪除階段「${p.name}」？${n ? `\n其下 ${n} 筆任務不會被刪除，會移到「未分階段」等待重新歸類。` : ''}`)) return;
+    store.setSettings(s => ({ phases: s.phases.filter(x => x.id !== p.id) }));
+  };
+  const cell = 'bg-transparent px-1.5 py-1 rounded outline-none hover:bg-[#F6F3EE] focus:bg-white focus:ring-1 focus:ring-[#D6CEC2]';
+  const overlaps = phases.some((a, i) => phases.some((b, j) => i < j && a.startMonth <= b.endMonth && b.startMonth <= a.endMonth));
+  return (
+    <Modal title="⚙️ 管理階段" onClose={onClose} width="max-w-3xl">
+      <div className="text-xs text-sub mb-3">每個階段的結束月份最後一天就是該階段的死線。點名稱可直接改名，月份修改即時生效。</div>
+      <div className="space-y-2">
+        {phases.map(p => {
+          const n = tasks.filter(t => t.phaseId === p.id).length;
+          return (
+            <div key={p.id} className="flex flex-wrap items-center gap-2 border border-line rounded-lg p-2.5">
+              <Editable value={p.name} onCommit={v => v.trim() && update(p.id, { name: v.trim() })} className={`${cell} font-medium flex-1 min-w-[180px]`} />
+              <input type="month" className={`${INPUT} !w-36`} value={p.startMonth} onChange={e => setRange(p, 'startMonth', e.target.value)} />
+              <span className="text-sub text-xs">至</span>
+              <input type="month" className={`${INPUT} !w-36`} value={p.endMonth} onChange={e => setRange(p, 'endMonth', e.target.value)} />
+              <span className="text-[11px] text-sub w-24 text-right">死線 {lastDayOf(p.endMonth).slice(5).replace('-', '/')} · {n} 筆</span>
+              <button className={`${BTN_GHOST} hover:!text-brick`} title="刪除階段" onClick={() => del(p)}>🗑</button>
+            </div>
+          );
+        })}
+        {phases.length === 0 && <div className="text-sm text-sub text-center py-4">尚無階段</div>}
+      </div>
+      {overlaps && <div className="text-xs text-brick mt-2">⚠️ 有階段的月份互相重疊，首頁預設階段會以排在前面的為準。</div>}
+      <form className="mt-4 pt-4 border-t border-line flex flex-wrap gap-2 items-end" onSubmit={e => {
+        e.preventDefault(); if (!name.trim() || !start || !end) return;
+        if (start > end) { alert('起始月份不能晚於結束月份'); return; }
+        store.setSettings(s => ({ phases: [...s.phases, { id: uid(), name: name.trim(), startMonth: start, endMonth: end }] }));
+        setName(''); setStart(addMonths(end, 1)); setEnd(addMonths(end, 3));
+      }}>
+        <div className="flex-1 min-w-[180px]"><label className={LABEL}>新增階段名稱</label><input className={INPUT} value={name} onChange={e => setName(e.target.value)} placeholder={`Phase ${phases.length + 1}：…`} /></div>
+        <div><label className={LABEL}>起始月份</label><input type="month" className={`${INPUT} !w-36`} value={start} onChange={e => setStart(e.target.value)} /></div>
+        <div><label className={LABEL}>結束月份</label><input type="month" className={`${INPUT} !w-36`} value={end} onChange={e => setEnd(e.target.value)} /></div>
+        <button className={BTN_PRIMARY} disabled={!name.trim()}>＋ 新增</button>
+      </form>
+    </Modal>
+  );
+}
+
+/* ---------- Excel 試算表批次編輯 ---------- */
+const COLS = ['category', 'subject', 'title', 'est', 'note'];
+const emptyRow = () => ({ category: '', subject: '', title: '', est: '', note: '' });
+
+function GridEditor({ store, phase, onClose }) {
+  const { subjects } = store.data.settings;
+  const cats = categoriesOf(subjects);
+  const [rows, setRows] = useState(() => Array.from({ length: 15 }, emptyRow));
+  const refs = useRef({});
+  const focusCell = (r, c) => setTimeout(() => { const el = refs.current[`${r}-${c}`]; if (el) { el.focus(); el.select?.(); } }, 0);
+
+  const normalizeCell = (row, col, raw) => {
+    const v = String(raw ?? '').trim();
+    const next = { ...row };
+    if (col === 'subject') {
+      if (!v) return next;
+      next.subject = v;
+      const hit = subjects.find(s => s.name === v && (!row.category || s.category === row.category)) || subjects.find(s => s.name === v);
+      if (hit && (!row.category || !cats.includes(row.category))) next.category = hit.category;
+    } else if (col === 'category') {
+      const sub = subjects.find(s => s.name === v);
+      if (!cats.includes(v) && sub) { next.category = sub.category; next.subject = sub.name; }
+      else next.category = v;
+    } else if (col === 'est') { const h = parseDurationInput(v); next.est = h == null ? v : String(h); }
+    else next[col] = v;
+    return next;
+  };
+  const setCell = (r, col, v) => setRows(rs => rs.map((row, i) => (i === r ? (col === 'est' || col === 'title' || col === 'note' ? { ...row, [col]: v } : normalizeCell(row, col, v)) : row)));
+
+  const onKeyDown = (e, r, c) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      if (COLS[c] === 'est') setRows(rs => rs.map((x, i) => i === r ? normalizeCell(x, 'est', e.target.value) : x));
+      if (r + 1 >= rows.length) setRows(rs => [...rs, ...Array.from({ length: 10 }, emptyRow)]);
+      focusCell(r + 1, c);
+    }
+  };
+  const onPaste = (e, r, c) => {
+    const text = e.clipboardData.getData('text/plain');
+    if (!text || (!text.includes('\t') && !text.includes('\n'))) return; // 單格交給瀏覽器
+    e.preventDefault();
+    const lines = text.replace(/\r/g, '').split('\n');
+    while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
+    setRows(rs => {
+      const out = [...rs];
+      while (out.length < r + lines.length) out.push(emptyRow());
+      lines.forEach((line, i) => {
+        let row = { ...out[r + i] };
+        line.split('\t').forEach((val, j) => { const ci = c + j; if (ci < COLS.length) row = normalizeCell(row, COLS[ci], val); });
+        out[r + i] = row;
+      });
+      return out;
+    });
+  };
+
+  const resolve = row => {
+    let category = row.category.trim(), subject = row.subject.trim();
+    if (!cats.includes(category)) { const s = subjects.find(x => x.name === subject); if (s) category = s.category; else return null; }
+    if (!subject) subject = subjects.find(s => s.category === category)?.name;
+    if (!subjects.some(s => s.category === category && s.name === subject)) return null;
+    return { category, subject };
+  };
+  const filled = rows.filter(r => r.title.trim());
+  const invalid = filled.filter(r => !resolve(r));
+
+  const commit = () => {
+    if (!filled.length) { alert('沒有可寫入的列（章節名稱為空的列會自動忽略）。'); return; }
+    if (invalid.length && !confirm(`有 ${invalid.length} 列的大類／子科無法辨識，將略過這些列。繼續寫入其餘 ${filled.length - invalid.length} 列？`)) return;
+    const news = filled.map(r => { const cs = resolve(r); if (!cs) return null; const est = parseDurationInput(r.est); return { id: uid(), phaseId: phase.id, ...cs, title: r.title.trim(), estHours: est == null ? 1 : est, note: r.note.trim(), status: 'backlog' }; }).filter(Boolean);
+    store.addTasks(news);
+    setRows(Array.from({ length: 15 }, emptyRow));
+    onClose();
+  };
+
+  const cellCls = 'w-full px-2 py-1.5 text-sm bg-transparent outline-none focus:bg-[#FFFDF8] focus:ring-1 focus:ring-inset focus:ring-[#BDB3A6]';
+  return (
+    <div className={`${CARD} p-4 mb-5`}>
+      <div className="flex flex-wrap items-center gap-2 mb-3">
+        <div className="text-sm font-medium">批次表格編輯 <span className="ml-1 text-xs font-normal px-1.5 py-0.5 rounded bg-[#F3F0EA] text-sub">寫入：{phase.name}</span></div>
+        <div className="text-xs text-sub">Tab 向右 · Enter 向下 · 可從 Excel／Google Sheets 框選多列直接 Ctrl+V 貼上</div>
+        <div className="flex-1" />
+        <button className={BTN} onClick={onClose}>✕ 取消</button>
+        <button className={BTN_PRIMARY} onClick={commit}>✓ 確認寫入資料庫{filled.length ? `（${filled.length - invalid.length} 列）` : ''}</button>
+      </div>
+      <datalist id="dl-cats">{cats.map(c => <option key={c} value={c} />)}</datalist>
+      {cats.map((c, i) => <datalist key={c} id={`dl-sub-${i}`}>{subjects.filter(s => s.category === c).map(s => <option key={s.id} value={s.name} />)}</datalist>)}
+      <datalist id="dl-sub-all">{subjects.map(s => <option key={s.id} value={s.name}>{s.category}</option>)}</datalist>
+      <div className="overflow-auto thin-scroll max-h-[460px] border border-line rounded-md">
+        <table className="w-full min-w-[760px] border-collapse text-sm">
+          <thead className="sticky top-0 bg-[#FCFBF9] z-10">
+            <tr className="text-xs text-sub">
+              <th className="border border-line w-10 font-normal py-1.5">#</th>
+              <th className="border border-line w-32 font-normal text-left px-2">大類 ▾</th>
+              <th className="border border-line w-36 font-normal text-left px-2">子科 ▾</th>
+              <th className="border border-line font-normal text-left px-2">章節名稱</th>
+              <th className="border border-line w-32 font-normal text-left px-2">預估工時</th>
+              <th className="border border-line w-56 font-normal text-left px-2">備註</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, r) => {
+              const bad = row.title.trim() && !resolve(row);
+              const ci = cats.indexOf(row.category);
+              return (
+                <tr key={r} className={bad ? 'bg-brickbg' : ''}>
+                  <td className="border border-line text-center text-[11px] text-sub">{r + 1}</td>
+                  {COLS.map((col, c) => (
+                    <td key={col} className="border border-line p-0">
+                      <input
+                        ref={el => (refs.current[`${r}-${c}`] = el)}
+                        className={cellCls}
+                        list={col === 'category' ? 'dl-cats' : col === 'subject' ? (ci >= 0 ? `dl-sub-${ci}` : 'dl-sub-all') : undefined}
+                                                value={row[col]}
+                        onChange={e => setCell(r, col, e.target.value)}
+                        onBlur={e => (col === 'category' || col === 'subject' || col === 'est') && setRows(rs => rs.map((x, i) => i === r ? normalizeCell(x, col, e.target.value) : x))}
+                        onKeyDown={e => onKeyDown(e, r, c)}
+                        onPaste={e => onPaste(e, r, c)}
+                        placeholder={r === 0 ? ['民事法', '民法', '債總：給付不能', '例: 1.5 或 45m', '可選'][c] : ''}
+                      />
+                    </td>
+                  ))}
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <div className="flex items-center justify-between mt-2">
+        <button className={BTN} onClick={() => setRows(rs => [...rs, ...Array.from({ length: 10 }, emptyRow)])}>＋ 增加 10 列</button>
+        {invalid.length > 0 && <span className="text-xs text-brick">紅底列的科目無法辨識，寫入時會略過</span>}
+      </div>
+    </div>
+  );
+}
+
+/* ---------- 科目管理 ---------- */
+function Editable({ value, onCommit, className }) {
+  const [v, setV] = useState(value);
+  useEffect(() => setV(value), [value]);
+  return <input className={className} value={v} onChange={e => setV(e.target.value)} onBlur={() => onCommit(v)} onKeyDown={e => e.key === 'Enter' && e.target.blur()} />;
+}
+function SubjectManager({ store, onClose }) {
+  const { subjects } = store.data.settings; const tasks = store.data.tasks;
+  const cats = categoriesOf(subjects);
+  const [newCat, setNewCat] = useState(''); const [newCatSub, setNewCatSub] = useState('');
+  const [addSub, setAddSub] = useState({});
+
+  const renameCategory = (oldN, newN) => {
+    newN = newN.trim(); if (!newN || newN === oldN) return;
+    if (cats.includes(newN)) { alert('已有同名大類'); return; }
+    store.mutate(d => ({ ...d, settings: { ...d.settings, subjects: d.settings.subjects.map(s => s.category === oldN ? { ...s, category: newN } : s) }, tasks: d.tasks.map(t => t.category === oldN ? { ...t, category: newN } : t) }));
+  };
+  const renameSubject = (cat, oldN, newN) => {
+    newN = newN.trim(); if (!newN || newN === oldN) return;
+    if (subjects.some(s => s.category === cat && s.name === newN)) { alert('此大類已有同名子科'); return; }
+    store.mutate(d => ({ ...d, settings: { ...d.settings, subjects: d.settings.subjects.map(s => s.category === cat && s.name === oldN ? { ...s, name: newN } : s) }, tasks: d.tasks.map(t => t.category === cat && t.subject === oldN ? { ...t, subject: newN } : t) }));
+  };
+  const delSubject = s => {
+    const n = tasks.filter(t => t.category === s.category && t.subject === s.name).length;
+    if (!confirm(`刪除子科「${s.name}」？${n ? `\n其下 ${n} 筆任務會保留，但需重新指定科目。` : ''}`)) return;
+    store.setSettings(st => ({ subjects: st.subjects.filter(x => x.id !== s.id) }));
+  };
+  const delCategory = c => {
+    const n = tasks.filter(t => t.category === c).length;
+    if (!confirm(`刪除大類「${c}」及其所有子科？${n ? `\n其下 ${n} 筆任務會保留，但需重新指定科目。` : ''}`)) return;
+    store.setSettings(st => ({ subjects: st.subjects.filter(x => x.category !== c) }));
+  };
+  const addSubject = c => {
+    const name = (addSub[c] || '').trim(); if (!name) return;
+    if (subjects.some(s => s.category === c && s.name === name)) { alert('已存在'); return; }
+    store.setSettings(st => {
+      const list = [...st.subjects]; let idx = -1; list.forEach((s, i) => { if (s.category === c) idx = i; });
+      list.splice(idx + 1, 0, { id: uid(), category: c, name }); return { subjects: list };
+    });
+    setAddSub(a => ({ ...a, [c]: '' }));
+  };
+
+  const cell = 'bg-transparent px-1.5 py-1 rounded outline-none hover:bg-[#F6F3EE] focus:bg-white focus:ring-1 focus:ring-[#D6CEC2]';
+
+  return (
+    <Modal title="⚙️ 管理科目" onClose={onClose} width="max-w-2xl">
+      <div className="text-xs text-sub mb-3">直接點文字即可改名（任務會同步更新）。色標依大類順序套用 5 色低彩度色盤。</div>
+      <div className="space-y-3 max-h-[60vh] overflow-y-auto thin-scroll pr-1">
+        {cats.map(c => {
+          const col = colorOf(c, subjects);
+          return (
+            <div key={c} className="border border-line rounded-lg p-3" style={{ background: col.bg + '66' }}>
+              <div className="flex items-center gap-2 mb-2">
+                <span className="w-3 h-3 rounded-sm" style={{ background: col.fg }} />
+                <Editable value={c} onCommit={v => renameCategory(c, v)} className={`${cell} font-medium flex-1`} />
+                <button className={`${BTN_GHOST} hover:!text-brick`} title="刪除大類" onClick={() => delCategory(c)}>🗑</button>
+              </div>
+              <div className="flex flex-wrap gap-1.5 pl-5">
+                {subjects.filter(s => s.category === c).map(s => (
+                  <div key={s.id} className="flex items-center bg-white border border-line rounded-md pl-1">
+                    <Editable value={s.name} onCommit={v => renameSubject(c, s.name, v)} className={`${cell} text-sm w-28`} />
+                    <button className="w-6 h-7 text-xs text-sub hover:text-brick" onClick={() => delSubject(s)}>✕</button>
+                  </div>
+                ))}
+                <form className="flex items-center" onSubmit={e => { e.preventDefault(); addSubject(c); }}>
+                  <input className={`${INPUT} !w-28 !py-1`} placeholder="＋ 新子科" value={addSub[c] || ''} onChange={e => setAddSub(a => ({ ...a, [c]: e.target.value }))} />
+                </form>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <form className="mt-4 pt-4 border-t border-line flex flex-wrap gap-2 items-end" onSubmit={e => {
+        e.preventDefault(); const c = newCat.trim(), s = newCatSub.trim(); if (!c || !s) return;
+        if (cats.includes(c)) { alert('已有同名大類'); return; }
+        store.setSettings(st => ({ subjects: [...st.subjects, { id: uid(), category: c, name: s }] })); setNewCat(''); setNewCatSub('');
+      }}>
+        <div className="flex-1 min-w-[120px]"><label className={LABEL}>新增大類</label><input className={INPUT} value={newCat} onChange={e => setNewCat(e.target.value)} placeholder="例：國際私法" /></div>
+        <div className="flex-1 min-w-[120px]"><label className={LABEL}>第一個子科</label><input className={INPUT} value={newCatSub} onChange={e => setNewCatSub(e.target.value)} placeholder="例：涉外民事法律適用法" /></div>
+        <button className={BTN_PRIMARY} disabled={!newCat.trim() || !newCatSub.trim()}>＋ 新增</button>
+      </form>
+    </Modal>
+  );
+}
+
+/* ====================== 當週排程 Kanban ====================== */
+function DropZone({ onDropTask, className = '', children }) {
+  const [over, setOver] = useState(false);
+  return (
+    <div
+      onDragOver={e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; if (!over) setOver(true); }}
+      onDragLeave={e => { if (!e.currentTarget.contains(e.relatedTarget)) setOver(false); }}
+      onDrop={e => { e.preventDefault(); setOver(false); const id = e.dataTransfer.getData('text/plain'); if (id) onDropTask(id); }}
+      className={`${className} transition ${over ? 'ring-2 ring-[#C9BFB2] bg-[#F3F0EA]' : ''}`}>
+      {children}
+    </div>
+  );
+}
+
+function KanbanCard({ task, subjects, phases = [], onUnschedule, unscheduleTitle = '抽回待排池', onComplete, onUncomplete, compact }) {
+  const done = task.status === 'completed';
+  const phaseName = task.isBuffer ? '' : phaseShort(phases.find(p => p.id === task.phaseId)?.name);
+  const c = task.isBuffer ? NEUTRAL : colorOf(task.category, subjects);
+  return (
+    <div
+      draggable={!done}
+      onDragStart={e => { e.dataTransfer.setData('text/plain', task.id); e.dataTransfer.effectAllowed = 'move'; }}
+      className={`group relative rounded-md border p-2 text-xs select-none ${done ? 'opacity-60' : 'cursor-grab active:cursor-grabbing hover:shadow-sm'} ${task.isBuffer ? 'border-dashed' : ''}`}
+      style={{ background: c.bg, borderColor: c.bd, color: c.fg }}>
+      <div className="flex items-start gap-1.5">
+        {(onComplete || onUncomplete) && (
+          <button onClick={() => (done ? onUncomplete?.() : onComplete?.())} className={`mt-px w-3.5 h-3.5 shrink-0 rounded-sm border flex items-center justify-center text-[9px] bg-white/70`} style={{ borderColor: c.fg }} title={done ? '取消完成' : '完成'}>{done ? '✓' : ''}</button>
+        )}
+        <div className={`flex-1 min-w-0 leading-snug pr-3 ${done ? 'line-through' : ''}`}>{task.title}</div>
+        {onUnschedule && !done && (
+          <button onClick={onUnschedule} className="absolute top-1 right-1 w-4 h-4 text-[10px] opacity-40 hover:opacity-100" title={unscheduleTitle}>✕</button>
+        )}
+      </div>
+      <div className="flex items-center justify-between mt-1 opacity-80 text-[11px]">
+        <span>{task.isBuffer ? '緩衝' : task.subject}{!compact && task.assignedDate && task.assignedDate < todayStr() && !done ? ` · 原 ${fmtMD(task.assignedDate)}` : ''}</span>
+        <span>{task.estHours}h{done && task.actualHours != null ? ` / 實 ${task.actualHours}h` : ''}</span>
+      </div>
+      {phaseName && <div className="mt-0.5 text-[10px] text-[#A39C94] truncate">{phaseName}</div>}
+    </div>
+  );
+}
+
+function WeekPage({ store }) {
+  const { tasks, settings } = store.data; const { subjects } = settings;
+  const T = todayStr();
+  const [weekStart, setWeekStart] = useState(() => mondayOf(new Date()));
+  const [capOpen, setCapOpen] = useState(false);
+  const [quickOpen, setQuickOpen] = useState(false);
+  const [completing, setCompleting] = useState(null);
+  const [poolScope, setPoolScope] = useState('week'); // week | all | backlog
+  const [overdueOpen, setOverdueOpen] = useState(true);
+  const [bufferForm, setBufferForm] = useState(null);
+
+  const days = Array.from({ length: 7 }, (_, i) => ymd(addDays(weekStart, i)));
+  const weekKey = isoWeek(weekStart);
+  const months = [...new Set(days.map(d => d.slice(0, 7)))];
+  const defaultMonth = months.includes(T.slice(0, 7)) ? T.slice(0, 7) : months[0];
+
+  const curWeek = isoWeek(new Date());
+  const overdue = tasks.filter(t => isOverdue(t, T));
+  // 本週待排清單：已指派到這一週、但還沒排到哪一天的任務
+  const weekPool = tasks.filter(t => t.status === 'in_week' && !t.assignedDate && t.assignedWeek === weekKey);
+  const pool = tasks.filter(t => t.status !== 'completed' && t.status !== 'in_week' && !t.assignedDate && !t.splitPending && (
+    poolScope === 'backlog' ? !t.assignedMonth && !t.adhoc : poolScope === 'all' ? !!t.assignedMonth : months.includes(t.assignedMonth)));
+  const weekTasks = tasks.filter(t => t.assignedDate && days.includes(t.assignedDate));
+  // 本週進度：凡 assignedWeek 為本週（待排清單 + 七天）的任務都計入分母
+  const weekAll = tasks.filter(t => t.assignedWeek === weekKey);
+  const weekTotal = sumEst(weekAll), weekDone = sumEst(weekAll.filter(t => t.status === 'completed'));
+  const weekRate = pctOf(weekDone, weekTotal);
+  const cap = settings.weeklyCapacityLimit; const overCap = weekTotal > cap;
+  const isThisWeek = weekKey === curWeek;
+  const weekDayNo = ((new Date().getDay() + 6) % 7) + 1;
+  const weekElapsed = isThisWeek ? (weekDayNo / 7) * 100 : weekKey < curWeek ? 100 : 0;
+  const doneWithActual = weekTasks.filter(t => t.status === 'completed' && t.actualHours != null);
+  const estDone = sumEst(doneWithActual), actDone = r2(doneWithActual.reduce((s, t) => s + (+t.actualHours || 0), 0));
+  const deviation = estDone > 0 ? ((actDone - estDone) / estDone) * 100 : null;
+
+  const toDay = (id, date) => store.updateTask(id, t => t.status === 'completed' ? {} : ({
+    assignedDate: date, assignedWeek: isoWeek(parseYmd(date)), assignedMonth: t.assignedMonth || date.slice(0, 7), status: 'scheduled', splitPending: false,
+  }));
+  // 拖進「本週待排清單」：寫入這一週的 assignedWeek
+  const toWeek = id => store.updateTask(id, t => t.status === 'completed' ? {} : ({
+    assignedDate: undefined, assignedWeek: weekKey, assignedMonth: months.includes(t.assignedMonth) ? t.assignedMonth : defaultMonth, status: 'in_week', splitPending: false,
+  }));
+  const toMonth = id => store.updateTask(id, t => t.status === 'completed' ? {} : ({
+    assignedDate: undefined, assignedWeek: undefined, assignedMonth: t.assignedMonth || defaultMonth, status: 'in_month', splitPending: false,
+  }));
+  const end = addDays(weekStart, 6);
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center gap-2">
+        <h2 className="text-lg font-medium mr-2">當週排程</h2>
+        <button className={BTN} onClick={() => setWeekStart(w => addDays(w, -7))}>‹ 上一週</button>
+        <button className={BTN} onClick={() => setWeekStart(mondayOf(new Date()))}>📅 回到本週</button>
+        <button className={BTN} onClick={() => setWeekStart(w => addDays(w, 7))}>下一週 ›</button>
+        <span className="text-sm text-sub ml-1">{weekStart.getFullYear()}/{weekStart.getMonth() + 1}/{weekStart.getDate()} – {end.getMonth() + 1}/{end.getDate()} · {weekKey}</span>
+        <div className="flex-1" />
+        <button className={BTN} onClick={() => setCapOpen(true)}>⚙️ 容量設定</button>
+        <button className={BTN_PRIMARY} onClick={() => setQuickOpen(true)}>＋ 插入今日臨時任務</button>
+      </div>
+
+      {/* 本週進度與負載面板 */}
+      <div className={`${CARD} p-4 grid gap-5 md:grid-cols-[1fr_1fr_auto] items-center`}>
+        <div>
+          <div className="flex justify-between gap-2 text-sm mb-1.5">
+            <span>本週達成率</span>
+            <span className="text-sub text-right">已完成 <b className="text-ink font-medium">{fmt1(weekDone)}</b> / 本週總任務 {fmt1(weekTotal)} hr（{Math.round(weekRate)}%）</span>
+          </div>
+          <ProgressBar pct={weekRate} marker={isThisWeek ? weekElapsed : undefined} />
+          <div className={`text-[11px] mt-1 ${isThisWeek && weekTotal > 0 && weekRate + 0.01 < weekElapsed ? 'text-brick' : 'text-sub'}`}>
+            {isThisWeek ? `本週已過 ${weekDayNo}/7 天（${Math.round(weekElapsed)}%）${weekTotal > 0 && weekRate + 0.01 < weekElapsed ? '・進度落後' : ''}` : weekKey < curWeek ? '已結束的週次' : '尚未開始的週次'}
+          </div>
+        </div>
+        <div>
+          <div className="flex justify-between gap-2 text-sm mb-1.5">
+            <span>負載 vs. 週安全容量</span>
+            <span className={overCap ? 'text-brick' : 'text-sub'}>{fmt1(weekTotal)} / {fmt1(cap)} hr</span>
+          </div>
+          <ProgressBar pct={pctOf(weekTotal, cap)} color={overCap ? '#8A4A45' : '#2D2B2A'} />
+          <div className={`text-[11px] mt-1 ${overCap ? 'text-brick' : 'text-sub'}`}>{overCap ? `超出安全容量 ${fmt1(weekTotal - cap)} hr` : `尚可排入 ${fmt1(cap - weekTotal)} hr`}</div>
+        </div>
+        <div className="text-xs text-sub md:text-right md:border-l md:border-line md:pl-4">
+          <div>預估 vs. 實際（本週已完成）</div>
+          {deviation == null ? <div className="mt-0.5">尚無完成記錄</div> : (
+            <div className="mt-0.5 text-ink text-sm">預估 {estDone}h → 實際 {actDone}h <span className={deviation > 15 ? 'text-brick' : 'text-sub'}>（{deviation >= 0 ? '+' : ''}{Math.round(deviation)}%）</span></div>
+          )}
+        </div>
+      </div>
+
+      {/* 過期格 */}
+      <div className="rounded-xl border border-[#EAD5D5] bg-[#FBF6F5]">
+        <button className="w-full flex items-center justify-between px-4 py-2.5 text-sm" onClick={() => setOverdueOpen(o => !o)}>
+          <span className="text-[#633333]">⚠️ 過期／未完成任務格 <span className="text-xs opacity-70">（{overdue.length} 筆 · {sumEst(overdue)} hr）— 拖曳到下方任一天重新安排</span></span>
+          <span className="text-xs text-sub">{overdueOpen ? '收合 ▴' : '展開 ▾'}</span>
+        </button>
+        {overdueOpen && (
+          <div className="px-4 pb-3">
+            {overdue.length === 0 ? <div className="text-xs text-sub pb-1">沒有過期任務，很好 ✓</div> : (
+              <div className="grid gap-2 grid-cols-[repeat(auto-fill,minmax(180px,1fr))]">
+                {overdue.map(t => <KanbanCard key={t.id} task={t} subjects={subjects} phases={settings.phases} onUnschedule={() => toMonth(t.id)} unscheduleTitle="移回月份池" onComplete={() => setCompleting(t)} />)}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-[250px_minmax(0,1fr)]">
+        {/* 待排池：上＝本週待排清單（寫入 assignedWeek），下＝月份池 */}
+        <div className={`${CARD} p-3 self-start`}>
+          <DropZone onDropTask={toWeek} className="rounded-lg -mx-1 px-1 pb-2">
+            <div className="flex items-center justify-between mb-2">
+              <h3 className="text-sm font-medium">🗓️ 本週待排清單</h3>
+              <span className="text-xs text-sub">{weekPool.length} 筆 · {sumEst(weekPool)}h</span>
+            </div>
+            <div className="space-y-1.5 max-h-[320px] overflow-y-auto thin-scroll pr-0.5 min-h-[56px]">
+              {weekPool.length === 0 && <div className="text-[11px] text-sub text-center py-4 border border-dashed border-line rounded-md">把任務拖到這裡＝排入 {weekKey.slice(5)}<br />（還沒決定哪一天）</div>}
+              {weekPool.map(t => (
+                <KanbanCard key={t.id} task={t} subjects={subjects} phases={settings.phases} compact onUnschedule={() => toMonth(t.id)} unscheduleTitle="移回月份池" />
+              ))}
+            </div>
+          </DropZone>
+          <div className="border-t border-line my-2" />
+        <DropZone onDropTask={toMonth} className="rounded-lg -mx-1 px-1">
+          <div className="flex items-center justify-between mb-2">
+            <h3 className="text-sm font-medium">月份池</h3>
+            <span className="text-xs text-sub">{pool.length} 筆 · {sumEst(pool)}h</span>
+          </div>
+          <select className={`${INPUT} !text-xs mb-2`} value={poolScope} onChange={e => setPoolScope(e.target.value)}>
+            <option value="week">本週涵蓋月份池（{months.map(m => +m.slice(5) + '月').join('、')}）</option>
+            <option value="all">全部月份池</option>
+            <option value="backlog">總庫未指派任務</option>
+          </select>
+          <div className="space-y-1.5 max-h-[560px] overflow-y-auto thin-scroll pr-0.5 min-h-[80px]">
+            {pool.length === 0 && <div className="text-xs text-sub text-center py-6">沒有待排任務<br />（到任務總庫勾選後「指派至月份池」）</div>}
+            {pool.map(t => (
+              <div key={t.id} className="relative">
+                <KanbanCard task={t} subjects={subjects} phases={settings.phases} compact />
+                {t.isBuffer && <button className="absolute top-1 right-1 w-4 h-4 text-[10px] text-sub hover:text-brick" title="刪除緩衝塊" onClick={() => store.deleteTasks([t.id])}>✕</button>}
+              </div>
+            ))}
+          </div>
+          <div className="mt-2 pt-2 border-t border-line">
+            {bufferForm ? (
+              <form className="flex gap-1.5" onSubmit={e => {
+                e.preventDefault(); const h = parseDurationInput(bufferForm.h); if (!(h > 0)) return;
+                store.addTasks([{ id: uid(), category: '緩衝', subject: '緩衝', title: bufferForm.title.trim() || '彈性緩衝時間', estHours: r2(h), status: 'in_month', assignedMonth: defaultMonth, isBuffer: true }]);
+                setBufferForm(null);
+              }}>
+                <input className={`${INPUT} !text-xs`} value={bufferForm.title} onChange={e => setBufferForm(f => ({ ...f, title: e.target.value }))} autoFocus />
+                <DurationInput className={`${INPUT} !text-xs !w-24`} value={bufferForm.h} onChange={v => setBufferForm(f => ({ ...f, h: v }))} />
+                <button className={`${BTN} !px-2 !text-xs`}>＋</button>
+              </form>
+            ) : (
+              <button className={`${BTN} w-full !text-xs border-dashed`} onClick={() => setBufferForm({ title: '彈性緩衝時間', h: '2' })}>＋ 建立緩衝時間塊（不計入各科進度）</button>
+            )}
+          </div>
+        </DropZone>
+        </div>
+
+        {/* 7 天 */}
+        <div className="overflow-x-auto thin-scroll">
+          <div className="grid grid-cols-7 gap-2 min-w-[840px]">
+            {days.map((d, i) => {
+              const list = tasks.filter(t => t.assignedDate === d);
+              const load = sumEst(list);
+              const over = load > settings.dailyCapacityLimit;
+              const isToday = d === T;
+              return (
+                <DropZone key={d} onDropTask={id => toDay(id, d)} className={`rounded-xl border p-2 min-h-[420px] flex flex-col ${isToday ? 'bg-white border-[#BDB3A6]' : d < T ? 'bg-[#F5F3EF] border-line' : 'bg-white border-line'}`}>
+                  <div className="mb-2 px-0.5">
+                    <div className="flex items-baseline justify-between">
+                      <span className={`text-sm ${isToday ? 'font-medium' : ''}`}>週{WEEKDAYS[i]}</span>
+                      <span className="text-xs text-sub">{fmtMD(d)}{isToday ? ' · 今天' : ''}</span>
+                    </div>
+                    <div className={`mt-1 text-[11px] inline-block px-1.5 rounded border ${over ? 'bg-brickbg text-[#633333] border-[#EAD5D5]' : 'text-sub border-line'}`}>
+                      {load} / {settings.dailyCapacityLimit} hr{over ? ' 超載' : ''}
+                    </div>
+                  </div>
+                  <div className="space-y-1.5 flex-1">
+                    {list.map(t => (
+                      <KanbanCard key={t.id} task={t} subjects={subjects} phases={settings.phases} compact
+                        onUnschedule={() => toWeek(t.id)} unscheduleTitle="抽回本週待排清單"
+                        onComplete={() => setCompleting(t)}
+                        onUncomplete={() => store.uncompleteTask(t.id)} />
+                    ))}
+                  </div>
+                </DropZone>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+
+      {capOpen && <CapacityModal store={store} onClose={() => setCapOpen(false)} />}
+      {quickOpen && <QuickTaskModal store={store} onClose={() => setQuickOpen(false)} />}
+      {completing && <CompleteModal task={completing} store={store} onClose={() => setCompleting(null)} />}
+    </div>
+  );
+}
+
+function CapacityModal({ store, onClose }) {
+  const s = store.data.settings;
+  const [daily, setDaily] = useState(String(s.dailyCapacityLimit)); const [weekly, setWeekly] = useState(String(s.weeklyCapacityLimit));
+  return (
+    <Modal title="⚙️ 容量設定" onClose={onClose}>
+      <form className="space-y-3" onSubmit={e => { e.preventDefault(); const d = parseDurationInput(daily), w = parseDurationInput(weekly); if (!(d > 0) || !(w > 0)) return; store.setSettings({ dailyCapacityLimit: r2(d), weeklyCapacityLimit: r2(w) }); onClose(); }}>
+        <div><label className={LABEL}>每日上限（hr）— 超過時欄位標籤轉為磚紅警示</label><DurationInput value={daily} onChange={setDaily} autoFocus /></div>
+        <div><label className={LABEL}>整週安全容量（hr）</label><DurationInput value={weekly} onChange={setWeekly} /></div>
+        <div className="flex justify-end gap-2"><button type="button" className={BTN} onClick={onClose}>取消</button><button className={BTN_PRIMARY}>儲存</button></div>
+      </form>
+    </Modal>
+  );
+}
+
+function QuickTaskModal({ store, onClose }) {
+  const { subjects } = store.data.settings;
+  const [cs, setCs] = useState({ category: subjects[0]?.category || '', subject: subjects[0]?.name || '' });
+  const [title, setTitle] = useState(''); const [est, setEst] = useState('1'); const [save, setSave] = useState(true);
+  return (
+    <Modal title="＋ 插入今日臨時任務" onClose={onClose}>
+      <form className="space-y-3" onSubmit={e => {
+        e.preventDefault(); if (!title.trim() || !cs.category) return;
+        const T = todayStr(); const h = parseDurationInput(est);
+        store.addTasks([{ id: uid(), phaseId: (phaseOfMonth(store.data.settings.phases, T.slice(0, 7)) || currentPhase(store.data.settings.phases) || {}).id, ...cs, title: title.trim(), estHours: h == null ? 1 : h, note: '', status: 'scheduled', assignedDate: T, assignedWeek: isoWeek(parseYmd(T)), assignedMonth: T.slice(0, 7), adhoc: !save }]);
+        onClose();
+      }}>
+        <div><label className={LABEL}>科目</label><SubjectSelect subjects={subjects} category={cs.category} subject={cs.subject} onChange={(category, subject) => setCs({ category, subject })} /></div>
+        <div><label className={LABEL}>任務名稱</label><input className={INPUT} value={title} onChange={e => setTitle(e.target.value)} autoFocus placeholder="例：補看老師加開的釋字解析" /></div>
+        <div><label className={LABEL}>預估工時（hr）</label><DurationInput value={est} onChange={setEst} /></div>
+        <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={save} onChange={e => setSave(e.target.checked)} />同步存入總資料庫（計入各科整體進度）</label>
+        <div className="flex justify-end gap-2"><button type="button" className={BTN} onClick={onClose}>取消</button><button className={BTN_PRIMARY}>落入今天</button></div>
+      </form>
+    </Modal>
+  );
+}
+
+/* ====================== App 外框 ====================== */
+function SettingsMenu({ store, user, onLogout }) {
+  const [open, setOpen] = useState(false);
+  const fileRef = useRef();
+  const ref = useRef();
+  useEffect(() => {
+    const h = e => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener('mousedown', h); return () => document.removeEventListener('mousedown', h);
+  }, []);
+  const item = 'w-full text-left px-3 py-2 text-sm hover:bg-[#F6F3EE] rounded-md';
+  return (
+    <div className="relative" ref={ref}>
+      <button className={BTN} onClick={() => setOpen(o => !o)}>⚙️ 設定</button>
+      {open && (
+        <div className="absolute right-0 mt-1 w-64 bg-white border border-line rounded-lg shadow-[0_8px_30px_rgba(45,43,42,.1)] p-1 z-50">
+          {user && (
+            <div className="px-3 py-2 border-b border-line mb-1">
+              <div className="text-sm truncate">{user.name}</div>
+              <div className="text-[11px] text-sub truncate">{user.email}</div>
+              <div className="text-[11px] text-sub mt-1 leading-snug">資料會同步到雲端，管理者可查看你的進度與操作紀錄。</div>
+            </div>
+          )}
+          <button className={item} onClick={() => { downloadFile(`law-study-os-backup-${todayStr()}.json`, JSON.stringify(store.data, null, 2)); setOpen(false); }}>⬇ 匯出 JSON 備份</button>
+          <button className={item} onClick={() => fileRef.current.click()}>⬆ 匯入還原 JSON</button>
+          <button className={item} onClick={() => {
+            try {
+              const b = JSON.parse(localStorage.getItem(store.backupKey) || 'null');
+              if (!b?.data) { alert('目前沒有快照'); return; }
+              if (confirm(`還原到上一步快照（${new Date(b.savedAt).toLocaleString()}）？`)) store.replaceAll(b.data);
+            } catch (e) { alert('快照讀取失敗'); }
+            setOpen(false);
+          }}>↶ 還原上一步快照</button>
+          <div className="border-t border-line my-1" />
+          <button className={`${item} text-brick`} onClick={() => { if (confirm('清除所有資料並重新載入範例？建議先匯出備份。')) store.replaceAll(seedData()); setOpen(false); }}>重設為範例資料</button>
+          {onLogout && <button className={item} onClick={() => { setOpen(false); onLogout(); }}>登出</button>}
+        </div>
+      )}
+      <input ref={fileRef} type="file" accept="application/json,.json" className="hidden" onChange={e => {
+        const f = e.target.files?.[0]; e.target.value = ''; if (!f) return;
+        const rd = new FileReader();
+        rd.onload = () => {
+          try {
+            const d = JSON.parse(rd.result);
+            if (!d || !Array.isArray(d.tasks)) throw new Error('格式不符');
+            if (confirm(`匯入 ${d.tasks.length} 筆任務並取代目前所有資料？`)) store.replaceAll(d);
+          } catch (err) { alert('匯入失敗：檔案不是有效的備份 JSON'); }
+          setOpen(false);
+        };
+        rd.readAsText(f);
+      }} />
+    </div>
+  );
+}
+
+function SavedFlash({ tick }) {
+  if (!tick) return null;
+  return <div key={tick} className="saved-flash fixed top-3 right-4 z-[60] text-xs text-sub bg-white/90 border border-line rounded-full px-3 py-1 pointer-events-none">✓ 已自動儲存</div>;
+}
+
+/* ====================== 雲端層（Firebase） ====================== */
+const fmtDT = ms => { if (!ms) return '—'; const d = new Date(ms); return `${d.getMonth() + 1}/${d.getDate()} ${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+const fmtAgo = ms => {
+  if (!ms) return '—'; const s = (Date.now() - ms) / 1000;
+  if (s < 60) return '剛剛'; if (s < 3600) return `${Math.floor(s / 60)} 分鐘前`; if (s < 86400) return `${Math.floor(s / 3600)} 小時前`;
+  if (s < 86400 * 7) return `${Math.floor(s / 86400)} 天前`; return fmtDT(ms);
+};
+
+function makeFirebaseAdapter() {
+  if (typeof firebase === 'undefined' || !FIREBASE_CONFIG.apiKey || FIREBASE_CONFIG.apiKey.includes('貼上')) return null;
+  firebase.initializeApp(FIREBASE_CONFIG);
+  const auth = firebase.auth(); const db = firebase.firestore();
+  db.enablePersistence({ synchronizeTabs: true }).catch(() => { });
+  const ts = () => firebase.firestore.FieldValue.serverTimestamp();
+  const toMs = v => (v && v.toMillis ? v.toMillis() : typeof v === 'number' ? v : null);
+  const norm = d => ({ ...d, updatedAt: toMs(d.updatedAt), createdAt: toMs(d.createdAt), lastSeenAt: toMs(d.lastSeenAt) });
+  const users = () => db.collection('users');
+  return {
+    onAuth: cb => auth.onAuthStateChanged(u => cb(u ? { uid: u.uid, email: (u.email || '').toLowerCase(), name: u.displayName || u.email, photo: u.photoURL || '' } : null)),
+    signIn: async () => {
+      const p = new firebase.auth.GoogleAuthProvider(); p.setCustomParameters({ prompt: 'select_account' });
+      try { await auth.signInWithPopup(p); }
+      catch (e) { if (['auth/popup-blocked', 'auth/operation-not-supported-in-this-environment', 'auth/cancelled-popup-request'].includes(e.code)) await auth.signInWithRedirect(p); else throw e; }
+    },
+    signOut: () => auth.signOut(),
+    getUser: async uid => { const s = await users().doc(uid).get(); return s.exists ? norm(s.data()) : null; },
+    saveUser: (uid, fields, logs = [], create = false) => {
+      const b = db.batch(); const ref = users().doc(uid);
+      b.set(ref, { ...fields, updatedAt: ts(), lastSeenAt: ts(), ...(create ? { createdAt: ts() } : {}) }, { merge: true });
+      logs.slice(0, 40).forEach(l => b.set(ref.collection('logs').doc(), { action: l.action, detail: l.detail || '', at: ts() }));
+      return b.commit();
+    },
+    subscribeUser: (uid, cb) => users().doc(uid).onSnapshot(s => { if (s.exists && !s.metadata.hasPendingWrites) cb(norm(s.data())); }, () => { }),
+    listUsers: async () => (await users().get()).docs.map(d => ({ uid: d.id, ...norm(d.data()) })),
+    listLogs: async (uid, n = 300) => (await users().doc(uid).collection('logs').orderBy('at', 'desc').limit(n).get()).docs.map(d => ({ id: d.id, ...d.data(), at: toMs(d.data().at) })),
+  };
+}
+let cloud = null;
+try { cloud = window.CLOUD_ADAPTER || makeFirebaseAdapter(); } catch (e) { console.error(e); }
+
+const cacheKeyOf = uid => `LAW_STUDY_OS_CLOUD_${uid}`;
+const profileFields = (user, data) => ({ email: user.email, name: user.name, photo: user.photo, dataJson: JSON.stringify(data) });
+
+/* ---------- 操作紀錄：比對前後兩版資料產生「誰在何時做了什麼」 ---------- */
+function diffLogs(prev, cur) {
+  const out = [];
+  const P = new Map(prev.tasks.map(t => [t.id, t])); const C = new Map(cur.tasks.map(t => [t.id, t]));
+  const label = t => `${t.isBuffer ? '緩衝' : t.subject}｜${t.title}`;
+  const pName = id => (cur.settings.phases.find(p => p.id === id) || {}).name || '未分階段';
+  const added = [], removed = [];
+  cur.tasks.forEach(t => {
+    const o = P.get(t.id);
+    if (!o) { if (!(t.parentTaskId && t.splitPending)) added.push(t); return; }
+    const justDone = o.status !== 'completed' && t.status === 'completed';
+    if (justDone) out.push({ action: '完成任務', detail: `${label(t)}（預估 ${t.estHours}h／實際 ${t.actualHours ?? '—'}h${t.splitDonePercent ? `；未讀完，已讀 ${t.splitDonePercent}%` : ''}）` });
+    else if (o.status === 'completed' && t.status !== 'completed') out.push({ action: '取消完成', detail: label(t) });
+    if (o.assignedDate !== t.assignedDate && t.status !== 'completed') out.push(t.assignedDate ? { action: '排程', detail: `${label(t)} → ${fmtMD(t.assignedDate)}` } : { action: '移回待排', detail: label(t) });
+    else if (o.assignedMonth !== t.assignedMonth && !t.assignedDate) out.push({ action: t.assignedMonth ? '指派月份池' : '移回未指派', detail: `${label(t)}${t.assignedMonth ? ` → ${t.assignedMonth}` : ''}` });
+    if (o.phaseId !== t.phaseId) out.push({ action: '移至階段', detail: `${label(t)} → ${pName(t.phaseId)}` });
+    if (!justDone && (o.title !== t.title || o.estHours !== t.estHours || (o.note || '') !== (t.note || '') || o.subject !== t.subject)) out.push({ action: '編輯任務', detail: label(t) });
+  });
+  prev.tasks.forEach(t => { if (!C.has(t.id)) removed.push(t); });
+  added.forEach(t => out.push({ action: '新增任務', detail: `${label(t)}（${t.estHours}h${t.adhoc ? '，臨時' : ''}）` }));
+  removed.forEach(t => out.push({ action: '刪除任務', detail: label(t) }));
+  const ps = prev.settings, cs = cur.settings;
+  if (ps.scratchpadMemo !== cs.scratchpadMemo) out.push({ action: '更新備忘錄', detail: '' });
+  const changed = [];
+  if (JSON.stringify(ps.phases) !== JSON.stringify(cs.phases)) changed.push('階段');
+  if (JSON.stringify(ps.subjects) !== JSON.stringify(cs.subjects)) changed.push('科目');
+  if (ps.targetExamDate !== cs.targetExamDate || ps.targetExamName !== cs.targetExamName) changed.push('考試倒數');
+  if (ps.dailyCapacityLimit !== cs.dailyCapacityLimit || ps.weeklyCapacityLimit !== cs.weeklyCapacityLimit) changed.push('容量上限');
+  if (changed.length) out.push({ action: '修改設定', detail: changed.join('、') });
+  if (JSON.stringify(prev.drive) !== JSON.stringify(cur.drive)) out.push({ action: '更新 Drive 目錄', detail: '' });
+  // 同類動作太多時合併成一筆
+  const groups = new Map(); out.forEach(l => { if (!groups.has(l.action)) groups.set(l.action, []); groups.get(l.action).push(l); });
+  const merged = [];
+  groups.forEach((arr, action) => {
+    if (arr.length <= 3) merged.push(...arr);
+    else merged.push({ action: `${action}（${arr.length} 筆）`, detail: arr.slice(0, 3).map(l => l.detail.split('（')[0]).join('、') + '…' });
+  });
+  return merged;
+}
+
+/* ---------- 同步：本機改動 1.2 秒後寫入雲端，並接收其他裝置的更新 ---------- */
+function useCloudSync(store, user) {
+  const [status, setStatus] = useState('synced'); // synced | pending | saving | error
+  const lastSynced = useRef(store.data);
+  const dataRef = useRef(store.data);
+  const timer = useRef(); const busy = useRef(false);
+  const clientId = useRef(uid());
+  const flush = useCallback(async () => {
+    clearTimeout(timer.current);
+    if (busy.current) { timer.current = setTimeout(() => flushRef.current(), 800); return; }
+    const cur = dataRef.current, prev = lastSynced.current;
+    if (cur === prev) return;
+    busy.current = true; setStatus('saving');
+    try {
+      await cloud.saveUser(user.uid, { ...profileFields(user, cur), clientId: clientId.current }, diffLogs(prev, cur));
+      lastSynced.current = cur;
+      setStatus(dataRef.current === cur ? 'synced' : 'pending');
+      if (dataRef.current !== cur) timer.current = setTimeout(() => flushRef.current(), 1200);
+    } catch (e) {
+      console.error('sync failed', e); setStatus('error');
+      timer.current = setTimeout(() => flushRef.current(), 10000);
+    } finally { busy.current = false; }
+  }, [user]);
+  const flushRef = useRef(flush); flushRef.current = flush;
+
+  useEffect(() => {
+    dataRef.current = store.data;
+    if (store.data === lastSynced.current) return;
+    setStatus(s => (s === 'error' ? s : 'pending'));
+    clearTimeout(timer.current); timer.current = setTimeout(() => flushRef.current(), 1200);
+  }, [store.data]);
+
+  useEffect(() => cloud.subscribeUser(user.uid, doc => {
+    if (!doc.dataJson || doc.clientId === clientId.current) return;
+    if (dataRef.current !== lastSynced.current || busy.current) return; // 本機有未同步的改動時不覆蓋
+    try { const d = normalize(JSON.parse(doc.dataJson)); lastSynced.current = d; dataRef.current = d; store.setRaw(d); } catch (e) { }
+  }), [user.uid]);
+
+  useEffect(() => {
+    const onHide = () => { if (document.visibilityState === 'hidden') flushRef.current(); };
+    const onUnload = e => { if (dataRef.current !== lastSynced.current) { flushRef.current(); e.preventDefault(); e.returnValue = ''; } };
+    document.addEventListener('visibilitychange', onHide); window.addEventListener('beforeunload', onUnload);
+    return () => { document.removeEventListener('visibilitychange', onHide); window.removeEventListener('beforeunload', onUnload); };
+  }, []);
+  return status;
+}
+
+function SyncBadge({ status }) {
+  const map = { synced: ['☁ 已同步', 'text-sub'], pending: ['☁ 等待同步…', 'text-sub'], saving: ['☁ 同步中…', 'text-sub'], error: ['⚠ 離線，稍後自動重試', 'text-brick'] };
+  const [t, c] = map[status] || map.synced;
+  return <span className={`text-xs ${c} whitespace-nowrap`}>{t}</span>;
+}
+
+function CenterCard({ children }) {
+  return <div className="min-h-screen flex items-center justify-center p-4"><div className={`${CARD} w-full max-w-md p-7`}>{children}</div></div>;
+}
+
+function LoginScreen() {
+  const [busy, setBusy] = useState(false); const [err, setErr] = useState('');
+  return (
+    <CenterCard>
+      <div className="flex items-center gap-2 mb-5">
+        <span className="w-7 h-7 rounded-md border border-ink flex items-center justify-center text-xs">律</span>
+        <span className="font-medium tracking-wide text-lg">司律讀書儀表板</span>
+      </div>
+      <p className="text-sm leading-relaxed text-ink">登入後，你的讀書進度會同步到雲端，換電腦也能接著用。</p>
+      <div className="mt-4 p-3 rounded-lg bg-paper border border-line text-xs text-sub leading-relaxed">
+        <b className="text-ink">登入前請知悉：</b>你的任務、進度、備忘錄與操作紀錄（何時新增／完成了什麼）會儲存在雲端，並<b className="text-ink">可由網站管理者查看</b>（僅能查看，無法修改）。若不同意，請改用不需登入的本機版。
+      </div>
+      <button disabled={busy} className={`${BTN_PRIMARY} w-full mt-5 !py-2.5`} onClick={async () => {
+        setBusy(true); setErr('');
+        try { await cloud.signIn(); } catch (e) { setErr(e.code === 'auth/popup-closed-by-user' ? '登入視窗已關閉，請再試一次' : `登入失敗：${e.message || e.code}`); }
+        setBusy(false);
+      }}>{busy ? '登入中…' : '使用 Google 帳號登入（同意上述說明）'}</button>
+      {err && <div className="text-xs text-brick mt-2">{err}</div>}
+    </CenterCard>
+  );
+}
+
+function SetupNeeded() {
+  return (
+    <CenterCard>
+      <div className="font-medium mb-2">尚未完成 Firebase 設定</div>
+      <p className="text-sm text-sub leading-relaxed">請把 Firebase 專案的設定碼貼到 <code className="text-ink">cloud.html</code> 最上方的 <code className="text-ink">FIREBASE_CONFIG</code>，再重新上傳到 GitHub。</p>
+    </CenterCard>
+  );
+}
+
+function Root() {
+  const [user, setUser] = useState(undefined);
+  useEffect(() => cloud.onAuth(setUser), []);
+  if (user === undefined) return <CenterCard><div className="text-sm text-sub">載入中…</div></CenterCard>;
+  if (!user) return <LoginScreen />;
+  return <CloudSession key={user.uid} user={user} />;
+}
+
+function CloudSession({ user }) {
+  const [initial, setInitial] = useState(null); const [err, setErr] = useState(''); const [retry, setRetry] = useState(0);
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        setErr('');
+        const doc = await cloud.getUser(user.uid);
+        if (doc && doc.dataJson) { if (alive) setInitial(normalize(JSON.parse(doc.dataJson))); return; }
+        // 第一次登入：優先帶入這台電腦本機版的資料
+        let local = null;
+        for (const k of [cacheKeyOf(user.uid), STORAGE_KEY]) {
+          try { const raw = localStorage.getItem(k); if (raw) { const d = JSON.parse(raw); if (d && Array.isArray(d.tasks)) { local = normalize(d); break; } } } catch (e) { }
+        }
+        const data = local || seedData();
+        await cloud.saveUser(user.uid, profileFields(user, data), [{ action: '首次登入', detail: local ? `匯入本機資料 ${data.tasks.length} 筆任務` : '建立範例資料' }], true);
+        if (alive) setInitial(data);
+      } catch (e) {
+        console.error(e);
+        if (alive) setErr(e.code === 'permission-denied' ? '沒有讀取權限：請確認 Firestore 安全規則已發布。' : `無法連線到雲端：${e.message || e.code}`);
+      }
+    })();
+    return () => { alive = false; };
+  }, [user.uid, retry]);
+  if (err) return <CenterCard><div className="text-sm text-brick mb-3">{err}</div><div className="flex gap-2"><button className={BTN_PRIMARY} onClick={() => setRetry(r => r + 1)}>重試</button><button className={BTN} onClick={() => cloud.signOut()}>登出</button></div></CenterCard>;
+  if (!initial) return <CenterCard><div className="text-sm text-sub">正在讀取你的雲端資料…</div></CenterCard>;
+  return <App user={user} initial={initial} />;
+}
+
+/* ---------- 管理者頁（唯讀） ---------- */
+const READONLY_API = ['replaceAll', 'setRaw', 'updateTask', 'updateTasks', 'addTasks', 'deleteTasks', 'setSettings', 'setDrive', 'mutate', 'completeTask', 'uncompleteTask', 'splitTask'];
+const readonlyStore = data => Object.assign({ data, savedTick: 0, backupKey: '' }, Object.fromEntries(READONLY_API.map(k => [k, () => { }])));
+const parseUserData = u => { try { return normalize(JSON.parse(u.dataJson)); } catch (e) { return null; } };
+
+function userSummary(data) {
+  const T = todayStr(), M = T.slice(0, 7);
+  const today = data.tasks.filter(t => t.assignedDate === T);
+  const month = data.tasks.filter(t => t.assignedMonth === M);
+  const ph = currentPhase(data.settings.phases);
+  const pt = ph ? data.tasks.filter(t => countsInSubject(t) && t.phaseId === ph.id) : [];
+  const done = arr => sumEst(arr.filter(t => t.status === 'completed'));
+  const overdue = data.tasks.filter(t => t.status !== 'completed' && ((t.assignedDate && t.assignedDate < T) || (t.splitPending && !t.assignedDate))).length;
+  return {
+    phase: ph, phasePct: pctOf(done(pt), sumEst(pt)),
+    todayDone: done(today), todayTotal: sumEst(today),
+    monthPct: pctOf(done(month), sumEst(month)), overdue,
+    taskCount: data.tasks.filter(countsInSubject).length,
+  };
+}
+
+function AdminPage() {
+  const [list, setList] = useState(null); const [err, setErr] = useState(''); const [sel, setSel] = useState(null);
+  const load = async () => { setErr(''); try { const us = await cloud.listUsers(); us.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0)); setList(us); } catch (e) { setErr(e.code === 'permission-denied' ? '沒有權限：請確認安全規則中的管理者 Email 正確並已發布。' : (e.message || String(e))); } };
+  useEffect(() => { load(); }, []);
+  if (sel) return <AdminUserView u={sel} onBack={() => { setSel(null); load(); }} />;
+  return (
+    <div>
+      <div className="flex items-center gap-2 mb-4">
+        <h2 className="text-lg font-medium">管理者 · 使用者總覽</h2>
+        <span className="text-xs text-sub">唯讀，無法修改任何人的資料</span>
+        <div className="flex-1" />
+        <button className={BTN} onClick={load}>↻ 重新整理</button>
+      </div>
+      {err && <div className="text-sm text-brick mb-3">{err}</div>}
+      {!list ? <div className="text-sm text-sub">載入中…</div> : (
+        <div className={`${CARD} overflow-x-auto thin-scroll`}>
+          <table className="w-full text-sm min-w-[820px]">
+            <thead><tr className="text-left text-xs text-sub border-b border-line bg-[#FCFBF9]">
+              {['使用者', '最後活動', '目前階段進度', '今日完成', '本月進度', '過期', '任務數', ''].map(h => <th key={h} className="p-3 font-normal">{h}</th>)}
+            </tr></thead>
+            <tbody>
+              {list.length === 0 && <tr><td colSpan="8" className="p-8 text-center text-sub">還沒有人登入過</td></tr>}
+              {list.map(u => {
+                const d = parseUserData(u); const s = d && userSummary(d);
+                return (
+                  <tr key={u.uid} className="border-b border-line last:border-0 hover:bg-[#FCFBF9]">
+                    <td className="p-3"><div className="flex items-center gap-2">
+                      {u.photo ? <img src={u.photo} className="w-7 h-7 rounded-full" referrerPolicy="no-referrer" /> : <span className="w-7 h-7 rounded-full bg-paper border border-line" />}
+                      <div className="min-w-0"><div className="truncate">{u.name || '(未命名)'}</div><div className="text-[11px] text-sub truncate">{u.email}</div></div>
+                    </div></td>
+                    <td className="p-3 text-sub" title={fmtDT(u.updatedAt)}>{fmtAgo(u.updatedAt)}</td>
+                    <td className="p-3 w-44">{s && s.phase ? <><div className="text-[11px] text-sub mb-1 truncate">{phaseShort(s.phase.name)} · {Math.round(s.phasePct)}%</div><ProgressBar pct={s.phasePct} height="h-1.5" /></> : '—'}</td>
+                    <td className="p-3">{s ? `${s.todayDone} / ${s.todayTotal} h` : '—'}</td>
+                    <td className="p-3">{s ? `${Math.round(s.monthPct)}%` : '—'}</td>
+                    <td className={`p-3 ${s?.overdue ? 'text-brick' : 'text-sub'}`}>{s ? s.overdue : '—'}</td>
+                    <td className="p-3 text-sub">{s ? s.taskCount : '—'}</td>
+                    <td className="p-3"><button className={BTN} onClick={() => setSel(u)}>檢視 →</button></td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AdminUserView({ u, onBack }) {
+  const data = useMemo(() => parseUserData(u), [u]);
+  const store = useMemo(() => data && readonlyStore(data), [data]);
+  const [tab, setTab] = useState('log');
+  const [logs, setLogs] = useState(null); const [err, setErr] = useState('');
+  useEffect(() => { cloud.listLogs(u.uid).then(setLogs).catch(e => setErr(e.message || String(e))); }, [u.uid]);
+  if (!data) return <div><button className={BTN} onClick={onBack}>‹ 返回</button><div className="mt-4 text-sm text-brick">此使用者的資料無法解析</div></div>;
+  const byDay = [];
+  (logs || []).forEach(l => { const day = l.at ? ymd(new Date(l.at)) : '同步中'; const g = byDay[byDay.length - 1]; if (g && g.day === day) g.items.push(l); else byDay.push({ day, items: [l] }); });
+  const ph = currentPhase(data.settings.phases);
+  return (
+    <div>
+      <div className="flex flex-wrap items-center gap-2 mb-3">
+        <button className={BTN} onClick={onBack}>‹ 使用者列表</button>
+        <div className="ml-1"><span className="font-medium">{u.name}</span> <span className="text-xs text-sub">{u.email} · 最後活動 {fmtAgo(u.updatedAt)}</span></div>
+        <div className="flex-1" />
+        <nav className="flex p-0.5 bg-white border border-line rounded-lg">
+          {[['log', '操作紀錄'], ['home', '首頁'], ['week', '當週排程'], ['db', '任務總庫']].map(([k, l]) => (
+            <button key={k} onClick={() => setTab(k)} className={`px-3 py-1 text-sm rounded-md ${tab === k ? 'bg-ink text-white' : 'text-sub hover:text-ink'}`}>{l}</button>
+          ))}
+        </nav>
+      </div>
+      {tab !== 'log' && <div className="mb-4 text-xs px-3 py-2 rounded-lg border border-[#EAE3CE] bg-[#F7F4EC] text-[#5C4F2E]">👁 唯讀檢視：你在這裡的點擊不會修改對方的資料。</div>}
+      {tab === 'log' && (
+        <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_320px]">
+          <div className={`${CARD} p-5`}>
+            <h3 className="text-sm font-medium mb-3">操作紀錄（最近 300 筆）</h3>
+            {err && <div className="text-sm text-brick">{err}</div>}
+            {!logs ? <div className="text-sm text-sub">載入中…</div> : logs.length === 0 ? <div className="text-sm text-sub">尚無紀錄</div> : (
+              <div className="space-y-4">
+                {byDay.map(g => (
+                  <div key={g.day}>
+                    <div className="text-xs text-sub mb-1.5 sticky top-14 bg-white py-1">{g.day === todayStr() ? '今天' : g.day.replace(/-/g, '/')}</div>
+                    <div className="space-y-1">
+                      {g.items.map(l => (
+                        <div key={l.id} className="flex gap-3 text-sm py-1 border-b border-[#F3F0EA] last:border-0">
+                          <span className="text-xs text-sub w-11 shrink-0 pt-0.5">{l.at ? `${pad(new Date(l.at).getHours())}:${pad(new Date(l.at).getMinutes())}` : ''}</span>
+                          <span className="shrink-0 font-medium">{l.action}</span>
+                          <span className="text-sub min-w-0 break-words">{l.detail}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+          <div className="space-y-5">
+            <PhasePanel tasks={data.tasks} phases={data.settings.phases} phase={ph} onSelect={() => { }} />
+            <SubjectProgress tasks={data.tasks} subjects={data.settings.subjects} phase={ph} />
+          </div>
+        </div>
+      )}
+      {tab === 'home' && <HomePage store={store} goWeek={() => setTab('week')} />}
+      {tab === 'week' && <WeekPage store={store} />}
+      {tab === 'db' && <DatabasePage store={store} />}
+    </div>
+  );
+}
+
+function App({ user, initial }) {
+  const store = useStore(initial, cacheKeyOf(user.uid));
+  const status = useCloudSync(store, user);
+  const isAdmin = user.email === ADMIN_EMAIL.toLowerCase();
+  const [page, setPage] = useState(() => { try { return localStorage.getItem('LAW_STUDY_OS_CLOUD_PAGE') || 'home'; } catch (e) { return 'home'; } });
+  useEffect(() => { try { localStorage.setItem('LAW_STUDY_OS_CLOUD_PAGE', page); } catch (e) { } }, [page]);
+  const tabs = [['home', '首頁'], ['week', '當週排程'], ['db', '任務總庫'], ...(isAdmin ? [['admin', '管理者']] : [])];
+  const cur = tabs.some(([k]) => k === page) ? page : 'home';
+  const logout = async () => {
+    if (status !== 'synced' && !confirm('還有改動尚未同步到雲端，確定要登出？')) return;
+    await cloud.signOut();
+  };
+  return (
+    <div className="min-h-screen">
+      <header className="sticky top-0 z-30 bg-paper/90 backdrop-blur border-b border-line">
+        <div className="max-w-[1400px] mx-auto px-4 py-3 flex flex-wrap items-center gap-3">
+          <div className="flex items-center gap-2 mr-2">
+            <span className="w-6 h-6 rounded-md border border-ink flex items-center justify-center text-[11px]">律</span>
+            <span className="font-medium tracking-wide">司律讀書儀表板</span>
+          </div>
+          <nav className="flex p-0.5 bg-white border border-line rounded-lg">
+            {tabs.map(([k, l]) => (
+              <button key={k} onClick={() => setPage(k)} className={`px-3.5 py-1 text-sm rounded-md transition ${cur === k ? 'bg-ink text-white' : 'text-sub hover:text-ink'}`}>{l}</button>
+            ))}
+          </nav>
+          <div className="flex-1" />
+          <SyncBadge status={status} />
+          {user.photo ? <img src={user.photo} referrerPolicy="no-referrer" className="w-7 h-7 rounded-full border border-line" title={user.email} /> : null}
+          <SettingsMenu store={store} user={user} onLogout={logout} />
+        </div>
+      </header>
+      <main className="max-w-[1400px] mx-auto px-4 py-5">
+        {cur === 'home' && <HomePage store={store} goWeek={() => setPage('week')} />}
+        {cur === 'week' && <WeekPage store={store} />}
+        {cur === 'db' && <DatabasePage store={store} />}
+        {cur === 'admin' && isAdmin && <AdminPage />}
+      </main>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(cloud ? <Root /> : <SetupNeeded />);
+</script>
+</body>
+</html>
