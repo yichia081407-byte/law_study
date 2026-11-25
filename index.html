@@ -71,6 +71,21 @@ const isoWeek = d => {
   return `${y}-W${pad(w)}`;
 };
 const todayStr = () => ymd(new Date());
+const fmt1 = n => (Math.round((+n || 0) * 10) / 10).toFixed(1);
+// 過期判定：日期已過、拆分待重排、或排入「已結束週次」卻還沒完成的週待排任務
+const isOverdue = (t, T = todayStr()) => t.status !== 'completed' && (
+  (t.assignedDate && t.assignedDate < T) || (t.splitPending && !t.assignedDate) ||
+  (t.status === 'in_week' && !t.assignedDate && !!t.assignedWeek && t.assignedWeek < isoWeek(parseYmd(T))));
+// 列出某段月份範圍內的所有週次（週一～週日）；assignedMonth 取該週週四所在月份並限制在範圍內
+const weeksInRange = (startYM, endYM) => {
+  const out = []; if (!startYM || !endYM) return out;
+  const last = parseYmd(lastDayOf(endYM)); const md = d => `${d.getMonth() + 1}/${d.getDate()}`;
+  for (let d = mondayOf(parseYmd(`${startYM}-01`)); d <= last && out.length < 160; d = addDays(d, 7)) {
+    let month = ymOf(addDays(d, 3)); if (month < startYM) month = startYM; if (month > endYM) month = endYM;
+    out.push({ key: isoWeek(d), month, label: `${isoWeek(d)} (${md(d)} - ${md(addDays(d, 6))})` });
+  }
+  return out;
+};
 const r2 = n => Math.round((+n || 0) * 10) / 10; // 全系統工時一律四捨五入至小數點後一位
 // 單框智能分鐘換算：1.5 → 1.5 hr；45m / 45分 → 0.8 hr；1h30m / 1時30分 → 1.5 hr；無法辨識回傳 null
 function parseDurationInput(raw) {
@@ -196,7 +211,7 @@ function normalize(d) {
   const fallback = (currentPhase(phases) || {}).id;
   const tasks = (Array.isArray(d.tasks) ? d.tasks : []).map(t => t.phaseId ? t : {
     ...t, phaseId: (phaseOfMonth(phases, t.assignedMonth || (t.assignedDate || '').slice(0, 7)) || {}).id || fallback,
-  });
+  }).map(t => (t.assignedDate && !t.assignedWeek ? { ...t, assignedWeek: isoWeek(parseYmd(t.assignedDate)) } : t));
   return {
     tasks,
     drive: Array.isArray(d.drive) ? d.drive : [],
@@ -237,7 +252,7 @@ function useStore() {
       setDrive: fn => setData(d => ({ ...d, drive: typeof fn === 'function' ? fn(d.drive) : fn })),
       mutate: fn => setData(d => fn(d)),
       completeTask: (id, actual) => setData(d => ({ ...d, tasks: d.tasks.map(t => t.id === id ? { ...t, status: 'completed', actualHours: r2(actual), completedAt: new Date().toISOString() } : t) })),
-      uncompleteTask: id => setData(d => ({ ...d, tasks: d.tasks.map(t => t.id === id ? { ...t, status: t.assignedDate ? 'scheduled' : t.assignedMonth ? 'in_month' : 'backlog', actualHours: undefined, completedAt: undefined } : t) })),
+      uncompleteTask: id => setData(d => ({ ...d, tasks: d.tasks.map(t => t.id === id ? { ...t, status: t.assignedDate ? 'scheduled' : t.assignedWeek ? 'in_week' : t.assignedMonth ? 'in_month' : 'backlog', actualHours: undefined, completedAt: undefined } : t) })),
       splitTask: (id, pct, actual) => setData(d => {
         const t = d.tasks.find(x => x.id === id); if (!t) return d;
         const doneEst = r2(t.estHours * pct / 100);
@@ -405,7 +420,13 @@ function HomePage({ store, goWeek }) {
   const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
   const elapsed = (now.getDate() / daysInMonth) * 100;
   const monthPct = pctOf(monthDone, monthTotal);
-  const overdueCount = tasks.filter(t => t.status !== 'completed' && ((t.assignedDate && t.assignedDate < T) || (t.splitPending && !t.assignedDate))).length;
+  const overdueCount = tasks.filter(t => isOverdue(t, T)).length;
+  const curWeek = isoWeek(now);
+  const weekAll = tasks.filter(t => t.assignedWeek === curWeek);
+  const weekTotal = sumEst(weekAll), weekDone = sumEst(weekAll.filter(t => t.status === 'completed'));
+  const weekPct = pctOf(weekDone, weekTotal);
+  const weekDayNo = ((now.getDay() + 6) % 7) + 1; // 週一 = 1 … 週日 = 7
+  const weekElapsed = (weekDayNo / 7) * 100;
   const dday = Math.ceil((parseYmd(settings.targetExamDate) - parseYmd(T)) / 864e5);
 
   return (
@@ -424,6 +445,10 @@ function HomePage({ store, goWeek }) {
           <div className="text-xs text-sub">{now.getFullYear()} 年 {now.getMonth() + 1} 月 {now.getDate()} 日（{WEEKDAYS[(now.getDay() + 6) % 7]}）</div>
           <div className="mt-1.5 text-[15px] leading-relaxed">
             今日排定 <b>{todays.length}</b> 個任務（共 <b>{total}</b> hr），已完成 <b>{doneH}</b> hr，剩餘 <b>{r2(total - doneH)}</b> hr。
+          </div>
+          <div className="mt-1 text-sm text-sub">
+            本週進度 <b className="text-ink font-medium">{fmt1(weekDone)}</b> / <b className="text-ink font-medium">{fmt1(weekTotal)}</b> hr
+            <span className="ml-1 text-xs">（{curWeek} · 第 {weekDayNo}/7 天）</span>
           </div>
           {overdueCount > 0 && (
             <button onClick={goWeek} className="mt-2 self-start text-xs px-2 py-1 rounded border border-[#EAD5D5] bg-brickbg text-[#633333] hover:opacity-80">
@@ -487,6 +512,14 @@ function HomePage({ store, goWeek }) {
             <div className="flex justify-between text-sm mb-1.5"><span>今日進度</span><span className="text-sub">{Math.round(pctOf(doneH, total))}%</span></div>
             <ProgressBar pct={pctOf(doneH, total)} />
             <div className="text-[11px] text-sub mt-1">{doneH} / {total} hr</div>
+          </div>
+          <div>
+            <div className="flex justify-between text-sm mb-1.5"><span>本週進度</span><span className="text-sub">{Math.round(weekPct)}%</span></div>
+            <ProgressBar pct={weekPct} marker={weekElapsed} />
+            <div className="text-[11px] text-sub mt-1 flex justify-between gap-2">
+              <span>已完成 {fmt1(weekDone)} hr / 本週配額 {fmt1(weekTotal)} hr</span>
+              <span className={`whitespace-nowrap ${weekTotal > 0 && weekPct + 0.01 < weekElapsed ? 'text-brick' : ''}`}>{weekDayNo}/7 天{weekTotal > 0 && weekPct + 0.01 < weekElapsed ? '・落後' : ''}</span>
+            </div>
           </div>
           <div>
             <div className="flex justify-between text-sm mb-1.5"><span>{now.getMonth() + 1} 月進度</span><span className="text-sub">{Math.round(monthPct)}%</span></div>
@@ -783,6 +816,7 @@ function statusLabel(t) {
   if (t.status === 'completed') return { text: '✓ 已完成', cls: 'text-[#344E38]' };
   if (t.assignedDate) return { text: `排定 ${fmtMD(t.assignedDate)}`, cls: 'text-ink' };
   if (t.splitPending) return { text: '⚠️ 待重排', cls: 'text-brick' };
+  if (t.status === 'in_week' && t.assignedWeek) return { text: `🗓️ ${t.assignedWeek.slice(5)} 週待排`, cls: 'text-ink' };
   if (t.assignedMonth) return { text: `${+t.assignedMonth.slice(5)} 月份池`, cls: 'text-sub' };
   return { text: '未指派', cls: 'text-[#B0A89E]' };
 }
@@ -800,6 +834,7 @@ function DatabasePage({ store }) {
   const [phaseTab, setPhaseTab] = useState(() => (currentPhase(phases) || {}).id || '__none__');
   const [movePhase, setMovePhase] = useState('');
   const [splitting, setSplitting] = useState(null);
+  const [weekMenu, setWeekMenu] = useState(false);
 
   const phaseIds = new Set(phases.map(p => p.id));
   const orphanCount = tasks.filter(t => countsInSubject(t) && !phaseIds.has(t.phaseId)).length;
@@ -814,13 +849,16 @@ function DatabasePage({ store }) {
   const defaultMonth = monthOptions.includes(ymOf(new Date())) ? ymOf(new Date()) : monthOptions[0] || ymOf(new Date());
   const [month, setMonth] = useState(defaultMonth);
   useEffect(() => { setMonth(defaultMonth); }, [phaseTab, activePhase?.startMonth, activePhase?.endMonth]);
+  const weekOptions = useMemo(() => (activePhase ? weeksInRange(activePhase.startMonth, activePhase.endMonth) : []), [activePhase?.startMonth, activePhase?.endMonth]);
+  const thisWeek = isoWeek(new Date());
+  useEffect(() => { if (sel.size === 0) setWeekMenu(false); }, [sel]);
 
   const order = useMemo(() => { const m = {}; subjects.forEach((s, i) => { m[`${s.category}||${s.name}`] = i; }); return m; }, [subjects]);
   const all = tasks.filter(countsInSubject).filter(t => (phaseTab === '__none__' ? !phaseIds.has(t.phaseId) : t.phaseId === phaseTab));
   const rows = all
     .filter(t => tab === '全部' || t.category === tab)
     .filter(t => !q || `${t.title} ${t.subject} ${t.note || ''}`.toLowerCase().includes(q.toLowerCase()))
-    .filter(t => statusF === 'all' || (statusF === 'backlog' ? (!t.assignedMonth && t.status !== 'completed') : statusF === 'month' ? (t.assignedMonth && !t.assignedDate && t.status !== 'completed') : statusF === 'scheduled' ? (t.assignedDate && t.status !== 'completed') : t.status === 'completed'))
+    .filter(t => statusF === 'all' || (statusF === 'backlog' ? (!t.assignedMonth && t.status !== 'completed') : statusF === 'week' ? (t.status === 'in_week' && !t.assignedDate) : statusF === 'month' ? (t.assignedMonth && !t.assignedDate && t.status !== 'completed' && t.status !== 'in_week') : statusF === 'scheduled' ? (t.assignedDate && t.status !== 'completed') : t.status === 'completed'))
     .map((t, i) => ({ t, i }))
     .sort((a, b) => ((order[`${a.t.category}||${a.t.subject}`] ?? 999) - (order[`${b.t.category}||${b.t.subject}`] ?? 999)) || a.i - b.i)
     .map(x => x.t);
@@ -831,6 +869,11 @@ function DatabasePage({ store }) {
   const assignMonth = () => {
     store.updateTasks(selIds, t => t.status === 'completed' ? { assignedMonth: month } : { assignedMonth: month, status: 'in_month', assignedDate: undefined, assignedWeek: undefined, splitPending: false });
     setSel(new Set());
+  };
+  // 直接指派至週次：寫入 assignedWeek + 對應月份，狀態 in_week，直接進入該週待排清單
+  const assignWeek = w => {
+    store.updateTasks(selIds, t => t.status === 'completed' ? { assignedWeek: w.key, assignedMonth: w.month } : { assignedWeek: w.key, assignedMonth: w.month, status: 'in_week', assignedDate: undefined, splitPending: false });
+    setWeekMenu(false); setSel(new Set());
   };
 
   return (
@@ -870,7 +913,7 @@ function DatabasePage({ store }) {
         <div className="flex-1" />
         <input className={`${INPUT} !w-48`} placeholder="搜尋章節／備註…" value={q} onChange={e => setQ(e.target.value)} />
         <select className={`${INPUT} !w-32`} value={statusF} onChange={e => setStatusF(e.target.value)}>
-          <option value="all">全部狀態</option><option value="backlog">未指派</option><option value="month">月份池</option><option value="scheduled">已排程</option><option value="completed">已完成</option>
+          <option value="all">全部狀態</option><option value="backlog">未指派</option><option value="week">週待排</option><option value="month">月份池</option><option value="scheduled">已排程</option><option value="completed">已完成</option>
         </select>
       </div>
 
@@ -944,6 +987,23 @@ function DatabasePage({ store }) {
             </select>
           ) : <span className="text-xs text-sub">先移入階段才能指派月份</span>}
           {activePhase && <button className={BTN_PRIMARY} disabled={!month} onClick={assignMonth}>📅 指派至月份池</button>}
+          {activePhase && (
+            <div className="relative">
+              <button className={weekMenu ? BTN_PRIMARY : BTN} onClick={() => setWeekMenu(o => !o)}>🗓️ 直接指派至週次 {weekMenu ? '▴' : '▾'}</button>
+              {weekMenu && (
+                <div className="absolute bottom-full mb-2 left-0 sm:left-auto sm:right-0 w-64 max-h-72 overflow-y-auto thin-scroll bg-white border border-line rounded-lg shadow-[0_8px_30px_rgba(45,43,42,.14)] py-1 z-50">
+                  <div className="px-3 py-1.5 text-[11px] text-sub border-b border-line sticky top-0 bg-white">{activePhase.name} 期間 · 點選即指派</div>
+                  {weekOptions.map(w => (
+                    <button key={w.key} ref={w.key === thisWeek ? el => { if (el && el.parentElement) el.parentElement.scrollTop = el.offsetTop - 40; } : undefined}
+                      className={`w-full text-left px-3 py-1.5 text-sm hover:bg-[#F6F3EE] ${w.key === thisWeek ? 'font-medium' : w.key < thisWeek ? 'text-sub' : ''}`}
+                      onClick={() => assignWeek(w)}>
+                      {w.label}{w.key === thisWeek && <span className="ml-1.5 text-[10px] px-1 rounded bg-[#F3F0EA] text-sub">本週</span>}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
           <select className={`${INPUT} !w-36`} value={movePhase} onChange={e => {
             const pid = e.target.value; if (!pid) return;
             const p = phases.find(x => x.id === pid);
@@ -991,7 +1051,7 @@ function SplitModal({ store, task, onClose }) {
     const news = parts.map(p => ({
       id: uid(), phaseId: task.phaseId, category: task.category, subject: task.subject, note: task.note || '',
       title: p.title.trim(), estHours: parseDurationInput(p.est),
-      status: month ? 'in_month' : 'backlog', ...(month ? { assignedMonth: month } : {}),
+      status: task.assignedWeek ? 'in_week' : month ? 'in_month' : 'backlog', ...(month ? { assignedMonth: month } : {}), ...(task.assignedWeek ? { assignedWeek: task.assignedWeek } : {}),
     }));
     store.mutate(d => ({ ...d, tasks: d.tasks.flatMap(x => (x.id === task.id ? news : [x])) }));
     onClose();
@@ -1035,7 +1095,7 @@ function SplitModal({ store, task, onClose }) {
         <button className={BTN_PRIMARY} disabled={!canSubmit} onClick={submit}
           title={!rowsOk ? '每一段都需要名稱與大於 0 的工時' : !matched && !allowChange ? '已分配總工時需等於原預估工時' : ''}>✓ 確認拆解</button>
       </div>
-      <div className="text-[11px] text-sub mt-2">確認後原任務會被刪除，各段落於原位置生成，並沿用原任務的階段、科目、備註與月份池。</div>
+      <div className="text-[11px] text-sub mt-2">確認後原任務會被刪除，各段落於原位置生成，並沿用原任務的階段、科目、備註與週次／月份池。</div>
     </Modal>
   );
 }
@@ -1330,7 +1390,7 @@ function DropZone({ onDropTask, className = '', children }) {
   );
 }
 
-function KanbanCard({ task, subjects, phases = [], onUnschedule, onComplete, onUncomplete, compact }) {
+function KanbanCard({ task, subjects, phases = [], onUnschedule, unscheduleTitle = '抽回待排池', onComplete, onUncomplete, compact }) {
   const done = task.status === 'completed';
   const phaseName = task.isBuffer ? '' : phaseShort(phases.find(p => p.id === task.phaseId)?.name);
   const c = task.isBuffer ? NEUTRAL : colorOf(task.category, subjects);
@@ -1346,7 +1406,7 @@ function KanbanCard({ task, subjects, phases = [], onUnschedule, onComplete, onU
         )}
         <div className={`flex-1 min-w-0 leading-snug pr-3 ${done ? 'line-through' : ''}`}>{task.title}</div>
         {onUnschedule && !done && (
-          <button onClick={onUnschedule} className="absolute top-1 right-1 w-4 h-4 text-[10px] opacity-40 hover:opacity-100" title="抽回待排池">✕</button>
+          <button onClick={onUnschedule} className="absolute top-1 right-1 w-4 h-4 text-[10px] opacity-40 hover:opacity-100" title={unscheduleTitle}>✕</button>
         )}
       </div>
       <div className="flex items-center justify-between mt-1 opacity-80 text-[11px]">
@@ -1374,11 +1434,21 @@ function WeekPage({ store }) {
   const months = [...new Set(days.map(d => d.slice(0, 7)))];
   const defaultMonth = months.includes(T.slice(0, 7)) ? T.slice(0, 7) : months[0];
 
-  const overdue = tasks.filter(t => t.status !== 'completed' && ((t.assignedDate && t.assignedDate < T) || (t.splitPending && !t.assignedDate)));
-  const pool = tasks.filter(t => t.status !== 'completed' && !t.assignedDate && !t.splitPending && (
+  const curWeek = isoWeek(new Date());
+  const overdue = tasks.filter(t => isOverdue(t, T));
+  // 本週待排清單：已指派到這一週、但還沒排到哪一天的任務
+  const weekPool = tasks.filter(t => t.status === 'in_week' && !t.assignedDate && t.assignedWeek === weekKey);
+  const pool = tasks.filter(t => t.status !== 'completed' && t.status !== 'in_week' && !t.assignedDate && !t.splitPending && (
     poolScope === 'backlog' ? !t.assignedMonth && !t.adhoc : poolScope === 'all' ? !!t.assignedMonth : months.includes(t.assignedMonth)));
   const weekTasks = tasks.filter(t => t.assignedDate && days.includes(t.assignedDate));
-  const weekLoad = sumEst(weekTasks);
+  // 本週進度：凡 assignedWeek 為本週（待排清單 + 七天）的任務都計入分母
+  const weekAll = tasks.filter(t => t.assignedWeek === weekKey);
+  const weekTotal = sumEst(weekAll), weekDone = sumEst(weekAll.filter(t => t.status === 'completed'));
+  const weekRate = pctOf(weekDone, weekTotal);
+  const cap = settings.weeklyCapacityLimit; const overCap = weekTotal > cap;
+  const isThisWeek = weekKey === curWeek;
+  const weekDayNo = ((new Date().getDay() + 6) % 7) + 1;
+  const weekElapsed = isThisWeek ? (weekDayNo / 7) * 100 : weekKey < curWeek ? 100 : 0;
   const doneWithActual = weekTasks.filter(t => t.status === 'completed' && t.actualHours != null);
   const estDone = sumEst(doneWithActual), actDone = r2(doneWithActual.reduce((s, t) => s + (+t.actualHours || 0), 0));
   const deviation = estDone > 0 ? ((actDone - estDone) / estDone) * 100 : null;
@@ -1386,7 +1456,11 @@ function WeekPage({ store }) {
   const toDay = (id, date) => store.updateTask(id, t => t.status === 'completed' ? {} : ({
     assignedDate: date, assignedWeek: isoWeek(parseYmd(date)), assignedMonth: t.assignedMonth || date.slice(0, 7), status: 'scheduled', splitPending: false,
   }));
-  const toPool = id => store.updateTask(id, t => t.status === 'completed' ? {} : ({
+  // 拖進「本週待排清單」：寫入這一週的 assignedWeek
+  const toWeek = id => store.updateTask(id, t => t.status === 'completed' ? {} : ({
+    assignedDate: undefined, assignedWeek: weekKey, assignedMonth: months.includes(t.assignedMonth) ? t.assignedMonth : defaultMonth, status: 'in_week', splitPending: false,
+  }));
+  const toMonth = id => store.updateTask(id, t => t.status === 'completed' ? {} : ({
     assignedDate: undefined, assignedWeek: undefined, assignedMonth: t.assignedMonth || defaultMonth, status: 'in_month', splitPending: false,
   }));
   const end = addDays(weekStart, 6);
@@ -1404,14 +1478,25 @@ function WeekPage({ store }) {
         <button className={BTN_PRIMARY} onClick={() => setQuickOpen(true)}>＋ 插入今日臨時任務</button>
       </div>
 
-      {/* 負載水位 */}
-      <div className={`${CARD} p-4 grid gap-4 md:grid-cols-[1fr_auto] items-center`}>
+      {/* 本週進度與負載面板 */}
+      <div className={`${CARD} p-4 grid gap-5 md:grid-cols-[1fr_1fr_auto] items-center`}>
         <div>
-          <div className="flex justify-between text-sm mb-1.5">
-            <span>本週負載水位</span>
-            <span className={weekLoad > settings.weeklyCapacityLimit ? 'text-brick' : 'text-sub'}>{weekLoad} / {settings.weeklyCapacityLimit} hr{weekLoad > settings.weeklyCapacityLimit ? '・超出安全容量' : ''}</span>
+          <div className="flex justify-between gap-2 text-sm mb-1.5">
+            <span>本週達成率</span>
+            <span className="text-sub text-right">已完成 <b className="text-ink font-medium">{fmt1(weekDone)}</b> / 本週總任務 {fmt1(weekTotal)} hr（{Math.round(weekRate)}%）</span>
           </div>
-          <ProgressBar pct={pctOf(weekLoad, settings.weeklyCapacityLimit)} color={weekLoad > settings.weeklyCapacityLimit ? '#8A4A45' : '#2D2B2A'} />
+          <ProgressBar pct={weekRate} marker={isThisWeek ? weekElapsed : undefined} />
+          <div className={`text-[11px] mt-1 ${isThisWeek && weekTotal > 0 && weekRate + 0.01 < weekElapsed ? 'text-brick' : 'text-sub'}`}>
+            {isThisWeek ? `本週已過 ${weekDayNo}/7 天（${Math.round(weekElapsed)}%）${weekTotal > 0 && weekRate + 0.01 < weekElapsed ? '・進度落後' : ''}` : weekKey < curWeek ? '已結束的週次' : '尚未開始的週次'}
+          </div>
+        </div>
+        <div>
+          <div className="flex justify-between gap-2 text-sm mb-1.5">
+            <span>負載 vs. 週安全容量</span>
+            <span className={overCap ? 'text-brick' : 'text-sub'}>{fmt1(weekTotal)} / {fmt1(cap)} hr</span>
+          </div>
+          <ProgressBar pct={pctOf(weekTotal, cap)} color={overCap ? '#8A4A45' : '#2D2B2A'} />
+          <div className={`text-[11px] mt-1 ${overCap ? 'text-brick' : 'text-sub'}`}>{overCap ? `超出安全容量 ${fmt1(weekTotal - cap)} hr` : `尚可排入 ${fmt1(cap - weekTotal)} hr`}</div>
         </div>
         <div className="text-xs text-sub md:text-right md:border-l md:border-line md:pl-4">
           <div>預估 vs. 實際（本週已完成）</div>
@@ -1431,7 +1516,7 @@ function WeekPage({ store }) {
           <div className="px-4 pb-3">
             {overdue.length === 0 ? <div className="text-xs text-sub pb-1">沒有過期任務，很好 ✓</div> : (
               <div className="grid gap-2 grid-cols-[repeat(auto-fill,minmax(180px,1fr))]">
-                {overdue.map(t => <KanbanCard key={t.id} task={t} subjects={subjects} phases={settings.phases} onUnschedule={() => toPool(t.id)} onComplete={() => setCompleting(t)} />)}
+                {overdue.map(t => <KanbanCard key={t.id} task={t} subjects={subjects} phases={settings.phases} onUnschedule={() => toMonth(t.id)} unscheduleTitle="移回月份池" onComplete={() => setCompleting(t)} />)}
               </div>
             )}
           </div>
@@ -1439,10 +1524,24 @@ function WeekPage({ store }) {
       </div>
 
       <div className="grid gap-4 lg:grid-cols-[250px_minmax(0,1fr)]">
-        {/* 待排池 */}
-        <DropZone onDropTask={toPool} className={`${CARD} p-3 self-start`}>
+        {/* 待排池：上＝本週待排清單（寫入 assignedWeek），下＝月份池 */}
+        <div className={`${CARD} p-3 self-start`}>
+          <DropZone onDropTask={toWeek} className="rounded-lg -mx-1 px-1 pb-2">
+            <div className="flex items-center justify-between mb-2">
+              <h3 className="text-sm font-medium">🗓️ 本週待排清單</h3>
+              <span className="text-xs text-sub">{weekPool.length} 筆 · {sumEst(weekPool)}h</span>
+            </div>
+            <div className="space-y-1.5 max-h-[320px] overflow-y-auto thin-scroll pr-0.5 min-h-[56px]">
+              {weekPool.length === 0 && <div className="text-[11px] text-sub text-center py-4 border border-dashed border-line rounded-md">把任務拖到這裡＝排入 {weekKey.slice(5)}<br />（還沒決定哪一天）</div>}
+              {weekPool.map(t => (
+                <KanbanCard key={t.id} task={t} subjects={subjects} phases={settings.phases} compact onUnschedule={() => toMonth(t.id)} unscheduleTitle="移回月份池" />
+              ))}
+            </div>
+          </DropZone>
+          <div className="border-t border-line my-2" />
+        <DropZone onDropTask={toMonth} className="rounded-lg -mx-1 px-1">
           <div className="flex items-center justify-between mb-2">
-            <h3 className="text-sm font-medium">待排清單</h3>
+            <h3 className="text-sm font-medium">月份池</h3>
             <span className="text-xs text-sub">{pool.length} 筆 · {sumEst(pool)}h</span>
           </div>
           <select className={`${INPUT} !text-xs mb-2`} value={poolScope} onChange={e => setPoolScope(e.target.value)}>
@@ -1475,6 +1574,7 @@ function WeekPage({ store }) {
             )}
           </div>
         </DropZone>
+        </div>
 
         {/* 7 天 */}
         <div className="overflow-x-auto thin-scroll">
@@ -1498,7 +1598,7 @@ function WeekPage({ store }) {
                   <div className="space-y-1.5 flex-1">
                     {list.map(t => (
                       <KanbanCard key={t.id} task={t} subjects={subjects} phases={settings.phases} compact
-                        onUnschedule={() => toPool(t.id)}
+                        onUnschedule={() => toWeek(t.id)} unscheduleTitle="抽回本週待排清單"
                         onComplete={() => setCompleting(t)}
                         onUncomplete={() => store.uncompleteTask(t.id)} />
                     ))}
